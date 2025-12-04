@@ -1,0 +1,11 @@
+01- activate the env
+
+
+02- uvicorn app:app --reload
+
+
+03- Chat UI: http://127.0.0.1:8000/
+    Admin UI: http://127.0.0.1:8000/admin-ui
+    API Docs: http://127.0.0.1:8000/docs
+
+

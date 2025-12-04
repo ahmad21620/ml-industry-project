@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AWS Billing Assistant – Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: {
+                500: "#6366f1",
+                600: "#4f46e5",
+                700: "#4338ca",
+              },
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+  <body class="bg-slate-950 text-slate-100">
+    <div class="min-h-screen flex flex-col">
+      <!-- Top bar -->
+      <header
+        class="border-b border-slate-800 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950"
+      >
+        <div
+          class="max-w-6xl mx-auto flex items-center justify-between px-4 py-3"
+        >
+          <div class="flex items-center gap-3">
+            <div
+              class="h-9 w-9 rounded-2xl bg-primary-600 flex items-center justify-center shadow-lg shadow-primary-900/40"
+            >
+              <span class="text-lg font-semibold tracking-tight">A</span>
+            </div>
+            <div>
+              <h1 class="text-lg font-semibold">AWS Billing Admin</h1>
+              <p class="text-xs text-slate-400">
+                Manage users and API keys for the multi-agent assistant
+              </p>
+            </div>
+          </div>
+          <a
+            href="/"
+            class="text-xs px-3 py-1.5 rounded-full border border-slate-700 hover:border-primary-500 hover:text-primary-300 transition"
+            >Back to chat</a
+          >
+        </div>
+      </header>
+
+      <main class="flex-1">
+        <div class="max-w-6xl mx-auto px-4 py-4 space-y-4">
+          <!-- Admin token -->
+          <section
+            class="rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur shadow-xl shadow-slate-950/60 p-4"
+          >
+            <h2 class="text-sm font-semibold mb-2">Admin authentication</h2>
+            <p class="text-xs text-slate-400 mb-3">
+              Use the admin token configured on the server to access user
+              management endpoints.
+            </p>
+            <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-end">
+              <div class="flex-1 w-full">
+                <label
+                  for="admin-token-input"
+                  class="block text-xs font-medium text-slate-300 mb-1"
+                  >X-Admin-Token</label
+                >
+                <input
+                  id="admin-token-input"
+                  type="password"
+                  class="w-full rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                  placeholder="Paste admin token"
+                />
+              </div>
+              <button
+                id="save-admin-token"
+                class="inline-flex items-center rounded-lg bg-primary-600 hover:bg-primary-700 px-3 py-2 text-xs font-medium shadow-lg shadow-primary-900/40"
+              >
+                Save token
+              </button>
+            </div>
+            <p class="mt-2 text-[11px] text-slate-500">
+              The token is stored only in your browser (localStorage).
+            </p>
+          </section>
+
+          <!-- User management -->
+          <section
+            class="rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur shadow-xl shadow-slate-950/60 p-4 space-y-3"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h2 class="text-sm font-semibold mb-1">Users & API keys</h2>
+                <p class="text-xs text-slate-400">
+                  Create, deactivate, or delete users. Keys are shown only here.
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  id="refresh-users"
+                  class="inline-flex items-center rounded-lg border border-slate-700 hover:border-primary-500 text-xs px-3 py-1.5"
+                >
+                  Refresh
+                </button>
+                <button
+                  id="create-user"
+                  class="inline-flex items-center rounded-lg bg-primary-600 hover:bg-primary-700 text-xs px-3 py-1.5"
+                >
+                  New user
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40"
+            >
+              <table class="min-w-full text-xs">
+                <thead class="bg-slate-900/70 border-b border-slate-800">
+                  <tr>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      ID
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Name
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      API key
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Active
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Created
+                    </th>
+                    <th class="px-3 py-2 text-right font-medium text-slate-300">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="users-table-body" class="divide-y divide-slate-800">
+                  <tr>
+                    <td
+                      colspan="6"
+                      class="px-3 py-3 text-center text-slate-500 text-xs"
+                    >
+                      Click <span class="font-semibold">Refresh</span> to load
+                      users.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const adminTokenInput = document.getElementById("admin-token-input");
+      const saveAdminTokenBtn = document.getElementById("save-admin-token");
+      const refreshUsersBtn = document.getElementById("refresh-users");
+      const createUserBtn = document.getElementById("create-user");
+      const usersTableBody = document.getElementById("users-table-body");
+
+      function getAdminToken() {
+        return localStorage.getItem("aws_admin_token") || "";
+      }
+
+      function setAdminToken(token) {
+        localStorage.setItem("aws_admin_token", token);
+      }
+
+      function ensureAdminToken() {
+        const token = getAdminToken();
+        if (!token) {
+          alert("Please paste your admin token first.");
+          return null;
+        }
+        return token;
+      }
+
+      // Initialize token input from localStorage
+      const savedAdminToken = getAdminToken();
+      if (savedAdminToken) {
+        adminTokenInput.value = savedAdminToken;
+        adminTokenInput.type = "password";
+      }
+
+      saveAdminTokenBtn.addEventListener("click", () => {
+        const val = adminTokenInput.value.trim();
+        if (!val) {
+          alert("Admin token cannot be empty.");
+          return;
+        }
+        setAdminToken(val);
+        alert("Admin token saved in this browser.");
+      });
+
+      async function fetchUsers() {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        usersTableBody.innerHTML = `
+          <tr>
+            <td colspan="6" class="px-3 py-3 text-center text-slate-500 text-xs">
+              Loading users…
+            </td>
+          </tr>
+        `;
+
+        try {
+          const res = await fetch("/admin/users", {
+            headers: { "X-Admin-Token": token },
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to load users (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          const users = await res.json();
+          renderUsers(users);
+        } catch (err) {
+          console.error(err);
+          usersTableBody.innerHTML = `
+            <tr>
+              <td colspan="6" class="px-3 py-3 text-center text-red-400 text-xs">
+                Error loading users. Check the admin token.
+              </td>
+            </tr>
+          `;
+        }
+      }
+
+      function renderUsers(users) {
+        if (!users || users.length === 0) {
+          usersTableBody.innerHTML = `
+            <tr>
+              <td colspan="6" class="px-3 py-3 text-center text-slate-500 text-xs">
+                No users yet. Click "New user" to create one.
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        usersTableBody.innerHTML = "";
+        for (const u of users) {
+          const tr = document.createElement("tr");
+          tr.className = "hover:bg-slate-900/60";
+
+          const created = new Date(u.created_at).toLocaleString();
+
+          tr.innerHTML = `
+            <td class="px-3 py-2 font-mono text-slate-300">${u.id}</td>
+            <td class="px-3 py-2 text-slate-100">${u.name}</td>
+            <td class="px-3 py-2">
+              <div class="flex items-center gap-2">
+                <span class="font-mono text-[11px] text-slate-300 truncate max-w-[200px]">
+                  ${u.api_key}
+                </span>
+                <button
+                  class="copy-key-btn text-[10px] px-2 py-1 rounded-full border border-slate-700 hover:border-primary-500 hover:text-primary-300"
+                  data-api-key="${u.api_key}"
+                >
+                  Copy
+                </button>
+              </div>
+            </td>
+            <td class="px-3 py-2">
+              <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] ${
+                u.is_active
+                  ? "bg-emerald-900/40 text-emerald-200 border border-emerald-500/60"
+                  : "bg-slate-800 text-slate-300 border border-slate-600"
+              }">
+                ${u.is_active ? "active" : "inactive"}
+              </span>
+            </td>
+            <td class="px-3 py-2 text-slate-400 text-[11px]">${created}</td>
+            <td class="px-3 py-2 text-right">
+              <div class="inline-flex gap-1">
+                <button
+                  class="toggle-active-btn text-[10px] px-2 py-1 rounded-full border border-slate-700 hover:border-primary-500 hover:text-primary-300"
+                  data-user-id="${u.id}"
+                  data-active="${u.is_active}"
+                >
+                  ${u.is_active ? "Deactivate" : "Activate"}
+                </button>
+                <button
+                  class="delete-user-btn text-[10px] px-2 py-1 rounded-full border border-red-600 text-red-200 hover:bg-red-900/40"
+                  data-user-id="${u.id}"
+                >
+                  Delete
+                </button>
+              </div>
+            </td>
+          `;
+
+          usersTableBody.appendChild(tr);
+        }
+
+        // Attach handlers
+        usersTableBody.querySelectorAll(".copy-key-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const key = btn.getAttribute("data-api-key");
+            navigator.clipboard
+              .writeText(key)
+              .then(() => alert("API key copied to clipboard"));
+          });
+        });
+
+        usersTableBody.querySelectorAll(".toggle-active-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const userId = btn.getAttribute("data-user-id");
+            const active = btn.getAttribute("data-active") === "true";
+            toggleUserActive(userId, !active);
+          });
+        });
+
+        usersTableBody.querySelectorAll(".delete-user-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const userId = btn.getAttribute("data-user-id");
+            if (
+              confirm(
+                "Delete this user? Their API key will stop working immediately."
+              )
+            ) {
+              deleteUser(userId);
+            }
+          });
+        });
+      }
+
+      async function createUser() {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        const name = prompt("Enter a name for the new user:");
+        if (!name) return;
+
+        try {
+          const res = await fetch("/admin/users", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Admin-Token": token,
+            },
+            body: JSON.stringify({ name }),
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to create user (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          const user = await res.json();
+          alert(
+            `User created.\n\nName: ${user.name}\nAPI key: ${user.api_key}\n\nCopy this key and give it to the user.`
+          );
+          fetchUsers();
+        } catch (err) {
+          console.error(err);
+          alert("Error creating user. Check the admin token and try again.");
+        }
+      }
+
+      async function toggleUserActive(userId, newActive) {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        try {
+          const res = await fetch(`/admin/users/${userId}`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Admin-Token": token,
+            },
+            body: JSON.stringify({ is_active: newActive }),
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to update user (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          fetchUsers();
+        } catch (err) {
+          console.error(err);
+          alert("Error updating user. Check the admin token and try again.");
+        }
+      }
+
+      async function deleteUser(userId) {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        try {
+          const res = await fetch(`/admin/users/${userId}`, {
+            method: "DELETE",
+            headers: { "X-Admin-Token": token },
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to delete user (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          fetchUsers();
+        } catch (err) {
+          console.error(err);
+          alert("Error deleting user. Check the admin token and try again.");
+        }
+      }
+
+      refreshUsersBtn.addEventListener("click", fetchUsers);
+      createUserBtn.addEventListener("click", createUser);
+
+      // Optional: auto-load users if admin token already present
+      if (getAdminToken()) {
+        fetchUsers();
+      }
+    </script>
+  </body>
+</html>

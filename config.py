@@ -16,10 +16,19 @@ FAISS_INDEX_DIR = Path(os.getenv("FAISS_INDEX_DIR", "./data/faiss_index"))
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------- DATABASE / LOGGING ----------
+
+DB_PATH = Path(os.getenv("DB_PATH", "./data/chat_logs.db"))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Admin token for managing users via /admin endpoints
+# Set this as an environment variable in real deployments.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "0000")                    #Repalce here
+
 # ---------- LLM PROVIDER ----------
 
 BASE_URL = "http://a6k2.dgx:34000/v1"
-API_KEY = "Replace_Me"                                              #Repalce here
+API_KEY = "sk-0LicA8eVoVLcwZMJrw4lJQ"                                              #Repalce here
 MODEL_NAME = "qwen3-32b"
 
 llm = ChatOpenAI(

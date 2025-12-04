@@ -2,6 +2,17 @@
 MLInd/
 venv/
 
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Editor history / backup
+.history/
+
+# Local DB and indexes
+data/chat_logs.db
+data/faiss_index/
+
 # Python cache
 __pycache__/
 *.pyc

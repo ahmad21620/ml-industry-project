@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
@@ -47,7 +47,7 @@ class ResponseAgent:
         self.rag_agent = rag_agent
         self.llm = llm_client
 
-    def answer(self, question: str, k: int = 5) -> Answer:
+    def answer(self, question: str, k: int = 5, chat_history: Optional[List[Tuple[str, str]]] = None) -> Answer:
         """
         High-level call:
         - retrieve context with RAG
@@ -60,17 +60,42 @@ class ResponseAgent:
 
         context_block = self._format_context(retrieved_chunks)
 
+        # Format recent conversation history (short-term memory)
+        history_text = ""
+        if chat_history:
+            history_lines = []
+            for role, content in chat_history:
+                prefix = "User" if role == "user" else "Assistant"
+                history_lines.append(f"{prefix}: {content}")
+            history_text = "\n".join(history_lines)
+
+        user_prompt_parts = [
+            "User question:",
+            question,
+            "",
+        ]
+
+        if history_text:
+            user_prompt_parts.extend(
+                [
+                    "Recent conversation history:",
+                    history_text,
+                    "",
+                ]
+            )
+
+        user_prompt_parts.extend(
+            [
+                "Context from AWS documentation and past tickets:",
+                context_block,
+                "",
+                "Use only this context and the conversation history to answer.",
+            ]
+        )
+
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    "User question:\n"
-                    f"{question}\n\n"
-                    "Context from AWS documentation and past tickets:\n"
-                    f"{context_block}\n\n"
-                    "Use only this context to answer."
-                )
-            ),
+            HumanMessage(content="\n".join(user_prompt_parts)),
         ]
 
         llm_response = self.llm.invoke(messages)
