@@ -1,0 +1,13 @@
+# LangChain core + integrations
+langchain
+langchain-community
+langchain-core
+langchain-openai
+langchain-text-splitters
+
+
+# Vector store (CPU-only FAISS)
+faiss-cpu
+
+# Env management (for LLM_BASE_URL, LLM_API_KEY, etc.)
+python-dotenv

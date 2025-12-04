@@ -1,0 +1,11 @@
+# LangChain core + integrations
+langchain==0.2.6
+langchain-community==0.2.6
+langchain-core==0.2.28
+langchain-openai==0.1.20
+
+# Vector store (CPU-only FAISS)
+faiss-cpu==1.8.0.post1
+
+# Env management (for LLM_BASE_URL, LLM_API_KEY, etc.)
+python-dotenv==1.0.1

@@ -1,0 +1,19 @@
+# Python venv
+MLInd/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local data
+data/faiss_index/
+data/chat_logs.db
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# VS Code
+.vscode/
