@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 
+from agents.memory_agent import UserMemoryAgent
 from agents.response_agent import ResponseAgent
 from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
 from db import (
@@ -36,6 +37,7 @@ security = HTTPBearer()
 # Global agent instances (initialized on startup or lazily)
 rag_agent: Optional[RAGAgent] = None
 response_agent: Optional[ResponseAgent] = None
+user_memory_agent: Optional[UserMemoryAgent] = None
 
 MAX_HISTORY_MESSAGES = 10
 
@@ -48,16 +50,18 @@ def initialize_agents_if_needed() -> None:
     so that the system still works even if the startup event was skipped
     or failed previously.
     """
-    global rag_agent, response_agent
+    global rag_agent, response_agent, user_memory_agent
 
     if rag_agent is None or response_agent is None:
         local_rag = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
         local_rag.build_or_load_index()
 
         local_response_agent = ResponseAgent(rag_agent=local_rag)
+        local_user_memory_agent = UserMemoryAgent()
 
         rag_agent = local_rag
         response_agent = local_response_agent
+        user_memory_agent = local_user_memory_agent
 
 # ---------- AUTH HELPERS ----------
 
@@ -185,6 +189,26 @@ def chat(
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
+    # Fetch current facts
+    current_memories = session.exec(
+        select(UserMemory).where(UserMemory.user_id == user.id)
+    ).all()
+    current_facts = [m.fact for m in current_memories]
+    # Propose & apply update
+    new_facts = user_memory_agent.update_memory(
+        user_message=request.message,
+        existing_facts=current_facts
+    )
+    print("new facts are", new_facts)
+    # Sync DB: delete old, insert new
+    if set(new_facts) != set(current_facts):
+        # Delete all old memory entries
+        for m in current_memories:
+            session.delete(m)
+        # Add new ones
+        for fact in new_facts:
+            session.add(UserMemory(user_id=user.id, fact=fact))
+        session.commit()
 
     # 2) Load conversation history for short-term memory
     history_messages: List[Message] = session.exec(

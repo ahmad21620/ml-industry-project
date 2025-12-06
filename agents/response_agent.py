@@ -84,6 +84,7 @@ class ResponseAgent:
         ]
 
         # Inject user memory if available
+
         if user_memory.strip():
             user_prompt_parts.extend([
                 "Known information about this user:",
@@ -104,6 +105,10 @@ class ResponseAgent:
             "",
             "Use ONLY this context, user memory, and conversation history to answer.",
         ])
+
+        print("=== FULL PROMPT ===")
+        print(user_memory)
+        print("=== END PROMPT ===")
 
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
