@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
-
-from rag.faiss_store import RAGAgent, RetrievedChunk
 from config import llm
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from rag.faiss_store import RAGAgent, RetrievedChunk
 
 
 @dataclass
@@ -29,29 +28,38 @@ class ResponseAgent:
     Uses:
     - RAGAgent to retrieve relevant context from AWS billing docs.
     - LLM (ChatOpenAI-compatible endpoint) to generate the answer.
+    - Optional user memory for personalization.
     """
 
     SYSTEM_PROMPT = (
         "You are an AWS billing support assistant. "
-        "Answer user questions using ONLY the provided context. "
+        "Answer user questions using ONLY the provided context AND the known user information. "
+        "Personalize your response based on the user's profile if relevant. "
         "If the context is not sufficient to answer reliably, "
         "say that you don't know and recommend contacting AWS Support "
         "or checking the AWS Billing and Cost Management documentation.\n\n"
         "Guidelines:\n"
         "- Be concise and precise.\n"
-        "- Do not invent policies or features not present in the context.\n"
-        "- If multiple possibilities exist, explain them clearly."
+        "- Do not invent policies, features, or user details not present in the context or user memory.\n"
+        "- If multiple possibilities exist, explain them clearly.\n"
+        "- Use the user's known context (e.g., location, language preference) to tailor answers when appropriate."
     )
 
     def __init__(self, rag_agent: RAGAgent, llm_client: ChatOpenAI = llm) -> None:
         self.rag_agent = rag_agent
         self.llm = llm_client
 
-    def answer(self, question: str, k: int = 5, chat_history: Optional[List[Tuple[str, str]]] = None) -> Answer:
+    def answer(
+        self,
+        question: str,
+        k: int = 5,
+        chat_history: Optional[List[Tuple[str, str]]] = None,
+        user_memory: str = "",  # ← NEW PARAMETER
+    ) -> Answer:
         """
         High-level call:
         - retrieve context with RAG
-        - call LLM with system + context + question
+        - call LLM with system + user memory + history + context + question
         - return answer text + structured citations
         """
         retrieved_chunks: List[RetrievedChunk] = self.rag_agent.retrieve(
@@ -75,23 +83,27 @@ class ResponseAgent:
             "",
         ]
 
-        if history_text:
-            user_prompt_parts.extend(
-                [
-                    "Recent conversation history:",
-                    history_text,
-                    "",
-                ]
-            )
-
-        user_prompt_parts.extend(
-            [
-                "Context from AWS documentation and past tickets:",
-                context_block,
+        # Inject user memory if available
+        if user_memory.strip():
+            user_prompt_parts.extend([
+                "Known information about this user:",
+                user_memory,
                 "",
-                "Use only this context and the conversation history to answer.",
-            ]
-        )
+            ])
+
+        if history_text:
+            user_prompt_parts.extend([
+                "Recent conversation history:",
+                history_text,
+                "",
+            ])
+
+        user_prompt_parts.extend([
+            "Context from AWS documentation and past tickets:",
+            context_block,
+            "",
+            "Use ONLY this context, user memory, and conversation history to answer.",
+        ])
 
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -110,13 +122,19 @@ class ResponseAgent:
             for chunk in retrieved_chunks
         ]
 
-        return Answer(answer_text=llm_response.content, citations=citations)
+        return Answer(
+            answer_text=str(llm_response.content).strip(),
+            citations=citations
+        )
 
     @staticmethod
     def _format_context(chunks: List[RetrievedChunk]) -> str:
         """
         Prepare a readable, labeled context section for the LLM.
         """
+        if not chunks:
+            return "No relevant documentation found."
+
         parts = []
         for idx, chunk in enumerate(chunks):
             header = (

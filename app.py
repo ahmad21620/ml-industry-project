@@ -1,29 +1,26 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 
-import secrets
-
-from fastapi import FastAPI, Depends, HTTPException, Header, Request
-from fastapi.templating import Jinja2Templates
-
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from sqlmodel import Session
-
-from config import DOCS_DIR, FAISS_INDEX_DIR, ADMIN_TOKEN
-from rag.faiss_store import RAGAgent
 from agents.response_agent import ResponseAgent
+from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
 from db import (
-    User,
     Conversation,
     Message,
+    User,
+    UserMemory,
     create_db_and_tables,
     get_session,
     select,
 )
-
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from rag.faiss_store import RAGAgent
+from sqlmodel import Session
 
 # ---------- APP SETUP ----------
 
@@ -211,10 +208,18 @@ def chat(
 
     # 4) Call RAG + ResponseAgent
     # Pass previous history (without the current message) to the agent
+# Fetch user memory
+    user_memories = session.exec(
+        select(UserMemory).where(UserMemory.user_id == user.id)
+    ).all()
+    user_memory_text = "\n".join(f"- {m.fact}" for m in user_memories) if user_memories else ""
+
+    # Call agent with memory
     answer_obj = response_agent.answer(
         question=request.message,
         k=request.top_k,
         chat_history=chat_history,
+        user_memory=user_memory_text,
     )
 
     # 5) Store assistant reply
