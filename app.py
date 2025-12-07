@@ -195,20 +195,23 @@ def chat(
     ).all()
     current_facts = [m.fact for m in current_memories]
     # Propose & apply update
-    new_facts = user_memory_agent.update_memory(
+    changes = user_memory_agent.update_memory_in_db(
+        user_id=user.id,
         user_message=request.message,
-        existing_facts=current_facts
+        session=session
+
     )
-    print("new facts are", new_facts)
-    # Sync DB: delete old, insert new
-    if set(new_facts) != set(current_facts):
-        # Delete all old memory entries
-        for m in current_memories:
-            session.delete(m)
-        # Add new ones
-        for fact in new_facts:
-            session.add(UserMemory(user_id=user.id, fact=fact))
-        session.commit()
+    print("DB for Memory changed? ", changes)
+    # print("new facts are", new_facts)
+    # # Sync DB: delete old, insert new
+    # if set(new_facts) != set(current_facts):
+    #     # Delete all old memory entries
+    #     for m in current_memories:
+    #         session.delete(m)
+    #     # Add new ones
+    #     for fact in new_facts:
+    #         session.add(UserMemory(user_id=user.id, fact=fact))
+    #     session.commit()
 
     # 2) Load conversation history for short-term memory
     history_messages: List[Message] = session.exec(
