@@ -39,7 +39,8 @@
             <div>
               <h1 class="text-lg font-semibold">AWS Billing Admin</h1>
               <p class="text-xs text-slate-400">
-                Manage users and API keys for the multi-agent assistant
+                Manage users, API keys, and escalations for the multi-agent
+                assistant
               </p>
             </div>
           </div>
@@ -59,8 +60,8 @@
           >
             <h2 class="text-sm font-semibold mb-2">Admin authentication</h2>
             <p class="text-xs text-slate-400 mb-3">
-              Use the admin token configured on the server to access user
-              management endpoints.
+              Use the admin token configured on the server to access management
+              endpoints.
             </p>
             <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-end">
               <div class="flex-1 w-full">
@@ -155,6 +156,72 @@
               </table>
             </div>
           </section>
+
+          <!-- Escalations -->
+          <section
+            class="rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur shadow-xl shadow-slate-950/60 p-4 space-y-3"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h2 class="text-sm font-semibold mb-1">Escalations</h2>
+                <p class="text-xs text-slate-400">
+                  Recent P0/P1/P2 escalations created by the assistant. Use this
+                  as your human support inbox.
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  id="refresh-escalations"
+                  class="inline-flex items-center rounded-lg border border-slate-700 hover:border-primary-500 text-xs px-3 py-1.5"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            <div
+              class="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40"
+            >
+              <table class="min-w-full text-xs">
+                <thead class="bg-slate-900/70 border-b border-slate-800">
+                  <tr>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Level
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Summary
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Conversation
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      User ID
+                    </th>
+                    <th class="px-3 py-2 text-left font-medium text-slate-300">
+                      Created
+                    </th>
+                    <th class="px-3 py-2 text-right font-medium text-slate-300">
+                      Status
+                    </th>
+                  </tr>
+                </thead>
+                <tbody
+                  id="escalations-table-body"
+                  class="divide-y divide-slate-800"
+                >
+                  <tr>
+                    <td
+                      colspan="6"
+                      class="px-3 py-3 text-center text-slate-500 text-xs"
+                    >
+                      Click <span class="font-semibold">Refresh</span> to load
+                      escalations.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
       </main>
     </div>
@@ -165,6 +232,12 @@
       const refreshUsersBtn = document.getElementById("refresh-users");
       const createUserBtn = document.getElementById("create-user");
       const usersTableBody = document.getElementById("users-table-body");
+
+      const refreshEscalationsBtn =
+        document.getElementById("refresh-escalations");
+      const escalationsTableBody = document.getElementById(
+        "escalations-table-body"
+      );
 
       function getAdminToken() {
         return localStorage.getItem("aws_admin_token") || "";
@@ -199,6 +272,8 @@
         setAdminToken(val);
         alert("Admin token saved in this browser.");
       });
+
+      // ---------- Users ----------
 
       async function fetchUsers() {
         const token = ensureAdminToken();
@@ -416,13 +491,168 @@
         }
       }
 
+      // ---------- Escalations ----------
+
+      async function fetchEscalations() {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        escalationsTableBody.innerHTML = `
+          <tr>
+            <td colspan="6" class="px-3 py-3 text-center text-slate-500 text-xs">
+              Loading escalations…
+            </td>
+          </tr>
+        `;
+
+        try {
+          const res = await fetch(
+            "/admin/escalations?only_unacknowledged=false",
+            {
+              headers: { "X-Admin-Token": token },
+            }
+          );
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to load escalations (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          const events = await res.json();
+          renderEscalations(events);
+        } catch (err) {
+          console.error(err);
+          escalationsTableBody.innerHTML = `
+            <tr>
+              <td colspan="6" class="px-3 py-3 text-center text-red-400 text-xs">
+                Error loading escalations. Check the admin token.
+              </td>
+            </tr>
+          `;
+        }
+      }
+
+      function renderEscalations(events) {
+        if (!events || events.length === 0) {
+          escalationsTableBody.innerHTML = `
+            <tr>
+              <td colspan="6" class="px-3 py-3 text-center text-slate-500 text-xs">
+                No escalations yet.
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        escalationsTableBody.innerHTML = "";
+        for (const e of events) {
+          const tr = document.createElement("tr");
+          tr.className = "hover:bg-slate-900/60";
+
+          let badgeClass =
+            "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] ";
+          if (e.level === "P0") {
+            badgeClass +=
+              "bg-red-900/60 text-red-100 border border-red-500/70";
+          } else if (e.level === "P1") {
+            badgeClass +=
+              "bg-amber-900/60 text-amber-100 border border-amber-500/70";
+          } else {
+            badgeClass += "bg-sky-900/60 text-sky-100 border border-sky-500/70";
+          }
+
+          const statusText = e.acknowledged ? "Handled" : "Waiting";
+          const statusClass = e.acknowledged
+            ? "text-emerald-300"
+            : "text-amber-300";
+
+          tr.innerHTML = `
+            <td class="px-3 py-2">
+              <span class="${badgeClass}">
+                ${e.level}
+              </span>
+            </td>
+            <td class="px-3 py-2 text-slate-100 max-w-xs">
+              <div class="line-clamp-2">
+                ${e.human_summary}
+              </div>
+            </td>
+            <td class="px-3 py-2 text-slate-400 font-mono text-[11px]">
+              #${e.conversation_id}
+            </td>
+            <td class="px-3 py-2 text-slate-400 font-mono text-[11px]">
+              ${e.user_id}
+            </td>
+            <td class="px-3 py-2 text-slate-400 text-[11px]">
+              ${new Date(e.created_at).toLocaleString()}
+            </td>
+            <td class="px-3 py-2 text-right">
+              <div class="inline-flex items-center gap-2">
+                <span class="text-[10px] ${statusClass}">${statusText}</span>
+                ${
+                  e.acknowledged
+                    ? ""
+                    : `<button
+                        class="ack-escalation-btn text-[10px] px-2 py-1 rounded-full border border-slate-700 hover:border-primary-500 hover:text-primary-300"
+                        data-event-id="${e.id}"
+                      >
+                        Mark as handled
+                      </button>`
+                }
+              </div>
+            </td>
+          `;
+
+          escalationsTableBody.appendChild(tr);
+        }
+
+        escalationsTableBody
+          .querySelectorAll(".ack-escalation-btn")
+          .forEach((btn) => {
+            btn.addEventListener("click", () => {
+              const id = btn.getAttribute("data-event-id");
+              acknowledgeEscalation(id);
+            });
+          });
+      }
+
+      async function acknowledgeEscalation(eventId) {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        try {
+          const res = await fetch(`/admin/escalations/${eventId}/ack`, {
+            method: "POST",
+            headers: { "X-Admin-Token": token },
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              `Failed to acknowledge escalation (${res.status}): ${text || "Unknown error"}`
+            );
+          }
+          await res.json();
+          fetchEscalations();
+        } catch (err) {
+          console.error(err);
+          alert(
+            "Error acknowledging escalation. Check the admin token and try again."
+          );
+        }
+      }
+
+      // ---------- Event wiring ----------
+
       refreshUsersBtn.addEventListener("click", fetchUsers);
       createUserBtn.addEventListener("click", createUser);
+      refreshEscalationsBtn.addEventListener("click", fetchEscalations);
 
-      // Optional: auto-load users if admin token already present
+      // Auto-load users and escalations if admin token already present
       if (getAdminToken()) {
         fetchUsers();
+        fetchEscalations();
       }
     </script>
+
   </body>
 </html>

@@ -18,7 +18,8 @@ class MemoryUpdateInstruction(BaseModel):
     action: str  # "add" | "update" | "delete" | "none"
     index: Optional[int] = None  # 1-based index of existing fact (for update/delete)
     new_fact: Optional[str] = None  # for add/update
-    reasoning: str
+    # Reasoning is useful but not strictly required, especially for "none" actions.
+    reasoning: Optional[str] = ""
 
 
 class UserMemoryAgent:

@@ -6,14 +6,16 @@ from typing import List, Literal, Optional
 
 from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
 from db import (
+    User,
     Conversation,
     Message,
-    User,
     UserMemory,
+    EscalationEvent,
     create_db_and_tables,
     get_session,
     select,
 )
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
@@ -144,6 +146,14 @@ class ChatResponse(BaseModel):
     sources: List[SourceCitationModel]
     escalation: Optional[EscalationInfo] = None
 
+class EscalationEventModel(BaseModel):
+    id: int
+    conversation_id: int
+    user_id: int
+    level: str
+    human_summary: str
+    created_at: datetime
+    acknowledged: bool
 
 class UserCreate(BaseModel):
     name: str
@@ -281,11 +291,13 @@ def chat(
         user_memory=user_memory_text,
     )
 
-    # 5) Store assistant reply
+    # 5) Store assistant message with initial text
+    final_answer_text = answer_obj.answer_text
+
     assistant_msg = Message(
         conversation_id=conversation.id,
         role="assistant",
-        content=answer_obj.answer_text,
+        content=final_answer_text,
     )
     session.add(assistant_msg)
 
@@ -294,28 +306,8 @@ def chat(
     session.commit()
     session.refresh(assistant_msg)
 
-    # 6) Rebuild full history (including new messages)
+    # 6) Prepare history for response and escalation
     updated_messages = history_messages + [user_msg, assistant_msg]
-    recent_for_response = updated_messages[-MAX_HISTORY_MESSAGES:]
-
-    response_messages = [
-        ChatMessageModel(
-            role=m.role,
-            content=m.content,
-            created_at=m.created_at,
-        )
-        for m in recent_for_response
-    ]
-
-    sources = [
-        SourceCitationModel(
-            source_file=c.source_file,
-            section_heading=c.section_heading,
-            chunk_id=c.chunk_id,
-            score=c.score,
-        )
-        for c in answer_obj.citations
-    ]
 
     # 7) Escalation analysis (P0/P1/P2/NONE)
     escalation_info: Optional[EscalationInfo] = None
@@ -350,12 +342,34 @@ def chat(
         )
 
         if decision.escalate:
-            # Persist escalation info on the conversation
+            # 7a) Persist escalation info on the conversation
             conversation.escalation_level = decision.priority
             if conversation.escalated_at is None:
                 conversation.escalated_at = datetime.utcnow()
             conversation.escalation_reason = decision.reason
             session.add(conversation)
+
+            # 7b) Create an escalation event (notification) for the admin
+            escalation_event = EscalationEvent(
+                conversation_id=conversation.id,
+                user_id=user.id,
+                level=decision.priority,
+                human_summary=decision.human_summary,
+            )
+            session.add(escalation_event)
+
+            session.commit()
+
+            # 7c) Append a clear notice for the user
+            support_notice = (
+                "I have notified our human AWS Billing support team about your issue. "
+                "They will review your case and contact you as soon as possible."
+            )
+            final_answer_text = f"{answer_obj.answer_text}\n\n---\n\n{support_notice}"
+
+            # Update the stored assistant message to include the notice
+            assistant_msg.content = final_answer_text
+            session.add(assistant_msg)
             session.commit()
 
         escalation_info = EscalationInfo(
@@ -365,15 +379,37 @@ def chat(
             human_summary=decision.human_summary,
         )
 
+    # 8) Build response messages and sources from updated state
+    # Ensure we use the (possibly updated) assistant_msg content
+    updated_messages[-1] = assistant_msg
+    recent_for_response = updated_messages[-MAX_HISTORY_MESSAGES:]
+
+    response_messages = [
+        ChatMessageModel(
+            role=m.role,
+            content=m.content,
+            created_at=m.created_at,
+        )
+        for m in recent_for_response
+    ]
+
+    sources = [
+        SourceCitationModel(
+            source_file=c.source_file,
+            section_heading=c.section_heading,
+            chunk_id=c.chunk_id,
+            score=c.score,
+        )
+        for c in answer_obj.citations
+    ]
+
     return ChatResponse(
-        answer=answer_obj.answer_text,
+        answer=final_answer_text,
         conversation_id=conversation.id,
         messages=response_messages,
         sources=sources,
         escalation=escalation_info,
     )
-
-
 
 # ---------- ADMIN: USER MANAGEMENT ----------
 
@@ -451,3 +487,62 @@ def delete_user(
     session.delete(user)
     session.commit()
     return {"detail": "User deleted"}
+
+@app.get("/admin/escalations", response_model=List[EscalationEventModel])
+def list_escalations(
+    only_unacknowledged: bool = True,
+    _: None = Depends(verify_admin_token),
+    session: Session = Depends(get_session),
+):
+    """
+    List escalation events for the admin.
+
+    By default, only returns events that have not been acknowledged yet.
+    Set `only_unacknowledged=false` to see all.
+    """
+    stmt = select(EscalationEvent).order_by(EscalationEvent.created_at.desc())
+    if only_unacknowledged:
+        stmt = stmt.where(EscalationEvent.acknowledged == False)  # noqa: E712
+
+    events = session.exec(stmt).all()
+    return [
+        EscalationEventModel(
+            id=e.id,
+            conversation_id=e.conversation_id,
+            user_id=e.user_id,
+            level=e.level,
+            human_summary=e.human_summary,
+            created_at=e.created_at,
+            acknowledged=e.acknowledged,
+        )
+        for e in events
+    ]
+
+
+@app.post("/admin/escalations/{event_id}/ack", response_model=EscalationEventModel)
+def acknowledge_escalation(
+    event_id: int,
+    _: None = Depends(verify_admin_token),
+    session: Session = Depends(get_session),
+):
+    """
+    Mark an escalation event as acknowledged/handled by the admin.
+    """
+    event = session.get(EscalationEvent, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Escalation event not found")
+
+    event.acknowledged = True
+    session.add(event)
+    session.commit()
+    session.refresh(event)
+
+    return EscalationEventModel(
+        id=event.id,
+        conversation_id=event.conversation_id,
+        user_id=event.user_id,
+        level=event.level,
+        human_summary=event.human_summary,
+        created_at=event.created_at,
+        acknowledged=event.acknowledged,
+    )

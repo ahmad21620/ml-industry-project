@@ -57,6 +57,32 @@ class UserMemory(SQLModel, table=True):
     fact: str = Field(max_length=500)  # free-text memory entry
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class EscalationEvent(SQLModel, table=True):
+    """
+    A notification to the admin about an escalated conversation.
+
+    This is the record that represents:
+    - which user and conversation were escalated,
+    - at what level (P0/P1/P2),
+    - with which human-readable summary,
+    - when it happened,
+    - and whether it has been acknowledged/handled.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id")
+    user_id: int = Field(foreign_key="user.id")
+    level: str = Field(
+        description='Escalation level: "P0", "P1", or "P2".',
+    )
+    human_summary: str = Field(
+        description="Short description of the issue suitable for the admin."
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    acknowledged: bool = Field(
+        default=False,
+        description="True when an admin has seen/handled this escalation.",
+    )
 # ---------- DB HELPERS ----------
 
 def create_db_and_tables() -> None:
