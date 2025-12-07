@@ -116,6 +116,12 @@
               </div>
             </div>
 
+            <!-- Escalation banner -->
+            <div
+              id="escalation-banner"
+              class="hidden mx-4 mt-3 mb-1 text-xs rounded-xl border px-3 py-2 shadow-sm"
+            ></div>
+
             <!-- Messages -->
             <div
               id="chat-container"
@@ -192,6 +198,10 @@
                   <dt>Last activity</dt>
                   <dd id="session-last-activity">–</dd>
                 </div>
+                <div class="flex justify-between">
+                  <dt>Escalation</dt>
+                  <dd id="session-escalation-status" class="font-semibold">None</dd>
+                </div>
               </dl>
             </div>
           </aside>
@@ -218,6 +228,11 @@
       const sessionLastActivity = document.getElementById(
         "session-last-activity"
       );
+      const sessionEscalationStatus = document.getElementById(
+        "session-escalation-status"
+      );
+      const escalationBanner = document.getElementById("escalation-banner");
+
 
       // Load saved API key from localStorage
       const savedKey = localStorage.getItem("aws_chat_api_key");
@@ -340,6 +355,53 @@
         }
       }
 
+      function renderEscalation(escalation) {
+        // Reset default view
+        sessionEscalationStatus.textContent = "None";
+        sessionEscalationStatus.className = "font-semibold text-slate-300";
+        escalationBanner.className =
+          "hidden mx-4 mt-3 mb-1 text-xs rounded-xl border px-3 py-2 shadow-sm";
+
+        if (!escalation || escalation.priority === "NONE" || !escalation.escalate) {
+          // Not escalated
+          return;
+        }
+
+        // Determine styling based on priority
+        let statusText = "";
+        let statusClass =
+          "font-semibold ";
+        let bannerClassBase =
+          "mx-4 mt-3 mb-1 text-xs rounded-xl border px-3 py-2 shadow-sm ";
+
+        if (escalation.priority === "P0") {
+          statusText = "Escalated (P0 – Critical)";
+          statusClass += "text-red-300";
+          escalationBanner.className =
+            bannerClassBase + "bg-red-950/70 border-red-600 text-red-100";
+        } else if (escalation.priority === "P1") {
+          statusText = "Escalated (P1 – High)";
+          statusClass += "text-amber-300";
+          escalationBanner.className =
+            bannerClassBase +
+            "bg-amber-950/70 border-amber-600 text-amber-100";
+        } else {
+          // P2
+          statusText = "Escalated (P2 – Normal)";
+          statusClass += "text-sky-300";
+          escalationBanner.className =
+            bannerClassBase + "bg-sky-950/70 border-sky-600 text-sky-100";
+        }
+
+        sessionEscalationStatus.textContent = statusText;
+        sessionEscalationStatus.className = statusClass;
+
+        // Show banner with human summary
+        escalationBanner.textContent =
+          escalation.human_summary || "This conversation has been escalated.";
+        // Ensure banner is visible (we overwrote className above)
+      }
+
       function updateSessionInfo(conversationId) {
         if (conversationId) {
           sessionConversationId.textContent = conversationId;
@@ -400,8 +462,10 @@
           renderConversation(data.messages);
           renderSources(data.sources);
           updateSessionInfo(data.conversation_id);
+          renderEscalation(data.escalation);
           messageInput.value = "";
           newConversationToggle.checked = false;
+
         } catch (err) {
           console.error(err);
           alert(

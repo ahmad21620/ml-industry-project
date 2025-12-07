@@ -4,8 +4,6 @@ import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from agents.memory_agent import UserMemoryAgent
-from agents.response_agent import ResponseAgent
 from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
 from db import (
     Conversation,
@@ -20,8 +18,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from rag.faiss_store import RAGAgent
 from sqlmodel import Session
+
+
+from rag.faiss_store import RAGAgent
+from agents.response_agent import ResponseAgent
+from agents.memory_agent import UserMemoryAgent
+from agents.escalation_agent import EscalationAgent, EscalationDecision
 
 # ---------- APP SETUP ----------
 
@@ -38,30 +41,53 @@ security = HTTPBearer()
 rag_agent: Optional[RAGAgent] = None
 response_agent: Optional[ResponseAgent] = None
 user_memory_agent: Optional[UserMemoryAgent] = None
+escalation_agent: Optional[EscalationAgent] = None
 
 MAX_HISTORY_MESSAGES = 10
 
 
 def initialize_agents_if_needed() -> None:
-    """
-    Ensure RAGAgent and ResponseAgent are initialized.
+    global rag_agent, response_agent, user_memory_agent, escalation_agent
 
-    This is called on startup and also lazily in the /chat endpoint,
-    so that the system still works even if the startup event was skipped
-    or failed previously.
-    """
-    global rag_agent, response_agent, user_memory_agent
-
-    if rag_agent is None or response_agent is None:
+    if (
+        rag_agent is None
+        or response_agent is None
+        or user_memory_agent is None
+        or escalation_agent is None
+    ):
         local_rag = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
         local_rag.build_or_load_index()
 
         local_response_agent = ResponseAgent(rag_agent=local_rag)
-        local_user_memory_agent = UserMemoryAgent()
+        local_memory_agent = UserMemoryAgent()
+        local_escalation_agent = EscalationAgent()
 
         rag_agent = local_rag
         response_agent = local_response_agent
-        user_memory_agent = local_user_memory_agent
+        user_memory_agent = local_memory_agent
+        escalation_agent = local_escalation_agent
+
+def user_requested_human_explicitly(message: str) -> bool:
+    """
+    Simple heuristic to detect if the user explicitly asks for a human / escalation.
+
+    This is a best-effort string check; the EscalationAgent will still see the full text.
+    """
+    text = message.lower()
+    keywords = [
+        "talk to a human",
+        "talk to human",
+        "human agent",
+        "live agent",
+        "real person",
+        "support agent",
+        "escalate",
+        "escalation",
+        "speak to a person",
+        "speak to someone",
+    ]
+    return any(k in text for k in text.split()) or any(k in text for k in keywords)
+
 
 # ---------- AUTH HELPERS ----------
 
@@ -105,12 +131,18 @@ class ChatRequest(BaseModel):
     new_conversation: bool = False
     top_k: int = 5
 
+class EscalationInfo(BaseModel):
+    escalate: bool
+    priority: str
+    reason: str
+    human_summary: str
 
 class ChatResponse(BaseModel):
     answer: str
     conversation_id: int
     messages: List[ChatMessageModel]
     sources: List[SourceCitationModel]
+    escalation: Optional[EscalationInfo] = None
 
 
 class UserCreate(BaseModel):
@@ -262,7 +294,7 @@ def chat(
     session.commit()
     session.refresh(assistant_msg)
 
-    # 6) Build response: recent messages + new turn
+    # 6) Rebuild full history (including new messages)
     updated_messages = history_messages + [user_msg, assistant_msg]
     recent_for_response = updated_messages[-MAX_HISTORY_MESSAGES:]
 
@@ -285,12 +317,62 @@ def chat(
         for c in answer_obj.citations
     ]
 
+    # 7) Escalation analysis (P0/P1/P2/NONE)
+    escalation_info: Optional[EscalationInfo] = None
+    if escalation_agent is not None:
+        # Prepare conversation history for the escalation agent
+        convo_for_escalation = [
+            (m.role, m.content) for m in updated_messages[-MAX_HISTORY_MESSAGES:]
+        ]
+
+        # Simple heuristics for metadata flags
+        user_requested_human_flag = user_requested_human_explicitly(request.message)
+        rag_no_results = len(answer_obj.citations) == 0
+        rag_top_score = None
+        if not rag_no_results:
+            try:
+                rag_top_score = max(c.score for c in answer_obj.citations)
+            except Exception:
+                rag_top_score = None
+
+        # For now we do not have sentiment or failed-attempt tracking wired in,
+        # so we pass defaults for those fields.
+        decision = escalation_agent.analyze(
+            latest_user_message=request.message,
+            conversation_history=convo_for_escalation,
+            assistant_answer=answer_obj.answer_text,
+            sentiment_label=None,
+            sentiment_score=None,
+            num_failed_attempts=0,
+            user_explicitly_requested_human=user_requested_human_flag,
+            rag_top_score=rag_top_score,
+            rag_no_results=rag_no_results,
+        )
+
+        if decision.escalate:
+            # Persist escalation info on the conversation
+            conversation.escalation_level = decision.priority
+            if conversation.escalated_at is None:
+                conversation.escalated_at = datetime.utcnow()
+            conversation.escalation_reason = decision.reason
+            session.add(conversation)
+            session.commit()
+
+        escalation_info = EscalationInfo(
+            escalate=decision.escalate,
+            priority=decision.priority,
+            reason=decision.reason,
+            human_summary=decision.human_summary,
+        )
+
     return ChatResponse(
         answer=answer_obj.answer_text,
         conversation_id=conversation.id,
         messages=response_messages,
         sources=sources,
+        escalation=escalation_info,
     )
+
 
 
 # ---------- ADMIN: USER MANAGEMENT ----------

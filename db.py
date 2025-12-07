@@ -27,6 +27,22 @@ class Conversation(SQLModel, table=True):
     started_at: datetime = Field(default_factory=datetime.utcnow)
     last_activity_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Escalation-related fields
+    escalation_level: Optional[str] = Field(
+        default=None,
+        index=True,
+        description='Escalation severity: "P0", "P1", "P2", or None if not escalated.',
+    )
+    escalated_at: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp when the conversation was first escalated.",
+    )
+    escalation_reason: Optional[str] = Field(
+        default=None,
+        description="Short internal reason explaining why the conversation was escalated.",
+    )
+
+
 
 class Message(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

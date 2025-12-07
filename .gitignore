@@ -10,14 +10,6 @@ __pycache__/
 .history/
 
 # Local DB and indexes
-data/chat_logs.db
-data/faiss_index/
-
-# Python cache
-__pycache__/
-*.pyc
-
-# Local data
 data/faiss_index/
 data/chat_logs.db
 
