@@ -1,48 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import re
+from datetime import datetime
 from typing import List, Optional, Tuple
 
-import logging
-
-from config import llm
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
+from config import llm
 from rag.faiss_store import RAGAgent, RetrievedChunk
-from rag.knowledge_graph_agent import KnowledgeGraphAgent, KGRetrievedChunk
-
-from datetime import datetime
-import re
-
-from tools import (
-    CurrencyFXTool,
-    CurrencyCalculatorTool,
-    FXRateResult,
-    FXAPIError,
-)
-
+from rag.knowledge_graph_agent import KGRetrievedChunk, KnowledgeGraphAgent
+from tools import CurrencyCalculatorTool, CurrencyFXTool, FXAPIError, FXRateResult
 from tracing import TraceBuilder
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class SourceCitation:
+class SourceCitation(BaseModel):
     source_file: str
     section_heading: str
     chunk_id: int
     score: float
 
 
-@dataclass
-class Answer:
+class Answer(BaseModel):
     answer_text: str
     citations: List[SourceCitation]
 
 
-@dataclass
-class CurrencyConversionResult:
+class CurrencyConversionResult(BaseModel):
     amount: float
     source_currency: str
     target_currency: str
@@ -54,11 +42,11 @@ class CurrencyConversionResult:
     user_supplied_rate: Optional[float] = None
 
 
-@dataclass
-class AnswerWithReasoning:
+class AnswerWithReasoning(BaseModel):
     reasoning: str
     answer_text: str
     citations: List[SourceCitation]
+
 
 class ResponseAgent:
     """
@@ -127,7 +115,6 @@ class ResponseAgent:
         "Reasoning: <detailed chain-of-thought>\n"
         "Final Answer: <short answer>"
     )
-
 
     # If the best RAG similarity score is below this, we consider RAG "weak"
     RAG_MIN_SCORE = 0.8
@@ -342,13 +329,12 @@ class ResponseAgent:
         # For now we return only the final answer text + citations,
         # but we still keep the parsed reasoning available if we want to
         # log it or add it to traces in the future.
-    
+
         return AnswerWithReasoning(
             reasoning=reasoning.strip(),
             answer_text=enhanced_final_answer.strip(),
             citations=citations,
         )
-
 
     def _maybe_enhance_answer_with_currency_conversion(
         self,
@@ -534,7 +520,6 @@ class ResponseAgent:
             rate_timestamp=fx_result.fetched_at,
             user_supplied_rate=user_supplied_rate,
         )
-
 
     @staticmethod
     def _parse_currency_conversion_request(
@@ -778,7 +763,6 @@ class ResponseAgent:
 
             parts.append("\n---\n")
         return "\n".join(parts)
-    
 
     @staticmethod
     def _parse_reasoning_and_answer(output: str) -> Tuple[str, str]:
@@ -802,4 +786,3 @@ class ResponseAgent:
             final_answer = output
 
         return reasoning, final_answer
-
