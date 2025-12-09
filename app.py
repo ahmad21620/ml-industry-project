@@ -4,37 +4,31 @@ import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 
-
-from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
-from db import (
-    create_db_and_tables,
-    get_session,
-    User,
-    Conversation,
-    Message,
-    UserMemory,
-    EscalationEvent,
-    MessageTrace,
-)
-
-import json
+from tracing import TraceBuilder
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-
+from agents.escalation_agent import EscalationAgent, EscalationDecision
+from agents.memory_agent import UserMemoryAgent
+from agents.response_agent import ResponseAgent
+from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
+from db import (
+    Conversation,
+    EscalationEvent,
+    Message,
+    MessageTrace,
+    User,
+    UserMemory,
+    create_db_and_tables,
+    get_session,
+    select,
+)
 from rag.faiss_store import RAGAgent
 from rag.knowledge_graph_agent import KnowledgeGraphAgent
-from agents.response_agent import ResponseAgent
-from agents.memory_agent import UserMemoryAgent
-from agents.escalation_agent import EscalationAgent, EscalationDecision
-from tools import CurrencyFXTool, CurrencyCalculatorTool
-
-from tracing import TraceBuilder
-
 
 # ---------- APP SETUP ----------
 
@@ -70,22 +64,14 @@ def initialize_agents_if_needed() -> None:
         local_rag = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
         local_rag.build_or_load_index()
 
+        
         local_kg = KnowledgeGraphAgent()
         if local_kg.is_graph_empty():
-            for pdf_file in DOCS_DIR.glob("*.pdf"):
+           for pdf_file in DOCS_DIR.glob("*.pdf"):
                 local_kg.index_pdf(pdf_file)
 
-        # Initialize currency tools (stateless, reused via the ResponseAgent).
-        local_currency_fx_tool = CurrencyFXTool()
-        local_currency_calculator_tool = CurrencyCalculatorTool()
 
-        local_response_agent = ResponseAgent(
-            rag_agent=local_rag,
-            kg_agent=local_kg,
-            #llm_client=llm,  # or omit if you are using the default in ResponseAgent
-            currency_fx_tool=local_currency_fx_tool,
-            currency_calculator_tool=local_currency_calculator_tool,
-        )
+        local_response_agent = ResponseAgent(rag_agent=local_rag, kg_agent=local_kg)
         local_memory_agent = UserMemoryAgent()
         local_escalation_agent = EscalationAgent()
 
@@ -94,7 +80,6 @@ def initialize_agents_if_needed() -> None:
         response_agent = local_response_agent
         user_memory_agent = local_memory_agent
         escalation_agent = local_escalation_agent
-
 
 def user_requested_human_explicitly(message: str) -> bool:
     """
@@ -172,13 +157,6 @@ class ChatResponse(BaseModel):
     messages: List[ChatMessageModel]
     sources: List[SourceCitationModel]
     escalation: Optional[EscalationInfo] = None
-
-class AdminMessageTraceModel(BaseModel):
-    message_id: int
-    role: str
-    content: str
-    created_at: datetime
-    trace: Optional[dict]
 
 class EscalationEventModel(BaseModel):
     id: int
@@ -322,7 +300,7 @@ def chat(
 
     # 8) Store assistant message with initial text
     final_answer_text = answer_obj.answer_text
-
+    reasoning = answer_obj.reasoning
     assistant_msg = Message(
         conversation_id=conversation.id,
         role="assistant",
@@ -355,8 +333,7 @@ def chat(
                 rag_top_score = max(c.score for c in answer_obj.citations)
             except Exception:
                 rag_top_score = None
-
-        # For now we do not have sentiment or failed-attempt tracking wired in,
+# For now we do not have sentiment or failed-attempt tracking wired in,
         # so we pass defaults for those fields.
         decision = escalation_agent.analyze(
             latest_user_message=request.message,
@@ -560,72 +537,6 @@ def list_escalations(
         for e in events
     ]
 
-@app.get(
-    "/admin/conversations/{conversation_id}/traces",
-    response_model=List[AdminMessageTraceModel],
-)
-async def get_conversation_traces(
-    conversation_id: int,
-    admin_token: str = Header(..., alias="X-Admin-Token"),
-):
-    """Return all messages of a conversation with their trace payloads.
-
-    This is used by the admin panel to inspect which agents/tools were used
-    for each message and how the pipeline behaved.
-    """
-    # Reuse the same admin-token check pattern as other admin endpoints.
-    if admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
-
-    with get_session() as session:
-        # Load all messages for this conversation, ordered by creation time.
-        messages = (
-            session.query(Message)
-            .filter(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-            .all()
-        )
-
-        if not messages:
-            return []
-
-        message_ids = [m.id for m in messages]
-
-        # Load all traces for these messages in a single query.
-        traces = (
-            session.query(MessageTrace)
-            .filter(
-                MessageTrace.conversation_id == conversation_id,
-                MessageTrace.message_id.in_(message_ids),
-            )
-            .all()
-        )
-        traces_by_message_id = {t.message_id: t for t in traces}
-
-        results: List[AdminMessageTraceModel] = []
-
-        for msg in messages:
-            trace_row = traces_by_message_id.get(msg.id)
-            if trace_row is not None:
-                try:
-                    trace_data = json.loads(trace_row.trace_json)
-                except Exception:
-                    # If parsing fails for any reason, expose raw string as a best-effort.
-                    trace_data = {"_raw": trace_row.trace_json}
-            else:
-                trace_data = None
-
-            results.append(
-                AdminMessageTraceModel(
-                    message_id=msg.id,
-                    role=msg.role,
-                    content=msg.content,
-                    created_at=msg.created_at,
-                    trace=trace_data,
-                )
-            )
-
-        return results
 
 @app.post("/admin/escalations/{event_id}/ack", response_model=EscalationEventModel)
 def acknowledge_escalation(

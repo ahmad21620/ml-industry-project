@@ -53,6 +53,13 @@ class CurrencyConversionResult:
     # Optional: user-supplied implied rate, never used for the calculation itself.
     user_supplied_rate: Optional[float] = None
 
+
+@dataclass
+class AnswerWithReasoning:
+    reasoning: str
+    answer_text: str
+    citations: List[SourceCitation]
+
 class ResponseAgent:
     """
     Uses:
@@ -63,24 +70,64 @@ class ResponseAgent:
     """
 
     SYSTEM_PROMPT = (
-        "You are an AWS billing support assistant. "
-        "Answer user questions using ONLY the provided context AND the known user information. "
-        "Personalize your response based on the user's profile if relevant. "
-        "If the context is not sufficient to answer reliably, "
-        "say that you don't know and recommend contacting AWS Support "
-        "or checking the AWS Billing and Cost Management documentation.\n\n"
-        "Guidelines:\n"
-        "- Be concise and precise.\n"
-        "- Do not invent policies, features, or user details not present in the context or user memory.\n"
-        "- If multiple possibilities exist, explain them clearly.\n"
-        "- Use the user's known context (e.g., location, language preference) to tailor answers when appropriate.\n"
-        "- For any currency conversion, always use the system's currency tools to obtain exchange rates; "
-        "never rely on user-provided exchange rates for the actual calculation.\n"
-        "- If the user provides an exchange rate, you may mention it and compare it to the tool-based rate, "
-        "but the computation must always use the rate returned by the currency tools.\n"
-        "- If live exchange rates are unavailable or an error occurs, clearly state that you cannot safely perform "
-        "the conversion instead of guessing or using user-provided rates."
+        "You are an AWS billing support assistant. You help users with ANY billing-related "
+        "questions, including checking balance, understanding charges, analyzing anomalies, "
+        "navigating the Billing Console, credit usage, invoices, budgets, payments, refunds, "
+        "and cost management tools.\n\n"
+
+        "Use ONLY the provided context + user memory + conversation history to answer. "
+        "If the context does not contain the required information, you MUST say so clearly.\n\n"
+
+        "You MUST return TWO sections in your final output:\n"
+        "1) Reasoning: — a detailed chain-of-thought explaining step-by-step how you reached the answer.\n"
+        "2) Final Answer: — a clean answer intended for the user.\n\n"
+
+        "The user explicitly wants reasoning, so do NOT hide chain-of-thought.\n"
+        "Do NOT hallucinate AWS features or policies.\n"
+        "If multiple interpretations exist, explain them.\n\n"
+
+        "============================================================\n"
+        "FEW-SHOT EXAMPLES\n"
+        "============================================================\n\n"
+
+        "EXAMPLE 1 — General navigation question\n"
+        "User: How can I check my AWS account balance?\n"
+        "Assistant:\n"
+        "Reasoning:\n"
+        "- The question is general and relates to checking charges.\n"
+        "- AWS Billing Console → Bills page contains this info.\n"
+        "Final Answer:\n"
+        "Open the AWS Console → Billing → Bills. This page shows your month-to-date charges.\n\n"
+
+        "EXAMPLE 2 — Sudden increase\n"
+        "User: My bill increased by $50. What happened?\n"
+        "Assistant:\n"
+        "Reasoning:\n"
+        "- Without exact service breakdown, I must generalize.\n"
+        "- Common causes: EC2 usage, NAT Gateway, S3 requests, data transfer.\n"
+        "- Must instruct user how to confirm.\n"
+        "Final Answer:\n"
+        "A $50 jump is typically driven by EC2 runtime, NAT Gateway traffic, or S3 activity. "
+        "Check Billing → Cost Explorer → Service view to identify the exact source.\n\n"
+
+        "EXAMPLE 3 — Missing context\n"
+        "User: Why am I being charged for AWS Backup?\n"
+        "Assistant:\n"
+        "Reasoning:\n"
+        "- If context lacks backup details, I must clearly state that.\n"
+        "Final Answer:\n"
+        "The provided context does not include AWS Backup usage details. "
+        "Check Billing → Cost Explorer → Service view or the AWS Backup dashboard.\n\n"
+
+        "============================================================\n"
+        "END FEW-SHOT EXAMPLES\n"
+        "============================================================\n\n"
+
+        "Follow the few-shot behavior EXACTLY. Respond with:\n"
+        "Reasoning: <detailed chain-of-thought>\n"
+        "Final Answer: <short answer>"
     )
+
 
     # If the best RAG similarity score is below this, we consider RAG "weak"
     RAG_MIN_SCORE = 0.8
@@ -112,14 +159,15 @@ class ResponseAgent:
     ) -> Answer:
         """
         High-level call:
-        - retrieve context (RAG first, optionally fall back to KG)
-        - call LLM with system + user memory + history + context + question
+        - handle direct currency conversion with tools (and tracing) when possible
+        - otherwise retrieve context (RAG first, optionally fall back to KG)
+        - call LLM with a chain-of-thought (CoT) style prompt and few-shot format
+        - parse reasoning + final answer from the LLM output
         - optionally update a TraceBuilder with metadata about the tools/agents used
-        - return answer text + structured citations
+        - return final answer text + structured citations
         """
 
-        # First, check if this is a direct currency conversion request that can be
-        # handled entirely by the currency tools. If so, bypass RAG/KG.
+        # 1) Direct currency conversion fast-path (no RAG/KG)
         try:
             conversion_result = self._handle_currency_conversion(question)
         except FXAPIError as exc:
@@ -220,23 +268,24 @@ class ResponseAgent:
                 citations=[],
             )
 
-        # Decide context source & build citations
+        # 2) Decide context source & build citations (RAG → KG fallback, with tracing)
         context_block, citations = self._get_best_context_and_citations(
             question=question,
             k=k,
             trace_builder=trace_builder,
         )
 
-        # Format recent conversation history (short-term memory)
+        # 3) Format recent conversation history (short-term memory)
         history_text = ""
         if chat_history:
-            history_lines = []
+            history_lines: List[str] = []
             for role, content in chat_history:
                 prefix = "User" if role == "user" else "Assistant"
                 history_lines.append(f"{prefix}: {content}")
             history_text = "\n".join(history_lines)
 
-        user_prompt_parts = [
+        # 4) Build CoT-style user prompt parts (from version 1)
+        user_prompt_parts: List[str] = [
             "User question:",
             question,
             "",
@@ -266,13 +315,11 @@ class ResponseAgent:
                 "Context from AWS documentation and/or knowledge graph:",
                 context_block,
                 "",
+                # Keep the strong CoT/few-shot formatting instruction:
                 "Use ONLY this context, user memory, and conversation history to answer.",
+                "Now respond EXACTLY in the format shown in the few-shot examples.",
             ]
         )
-
-        print("=== FULL PROMPT (user memory only for debug) ===")
-        print(user_memory)
-        print("=== END PROMPT ===")
 
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -280,18 +327,28 @@ class ResponseAgent:
         ]
 
         llm_response = self.llm.invoke(messages)
+        full_output = str(llm_response.content).strip()
 
-        raw_answer_text = str(llm_response.content).strip()
-        final_answer_text = self._maybe_enhance_answer_with_currency_conversion(
+        # 5) Parse reasoning + final answer from the LLM output (from version 1)
+        reasoning, final_answer = self._parse_reasoning_and_answer(full_output)
+
+        # 6) Optionally enhance the *final answer* with a currency conversion
+        enhanced_final_answer = self._maybe_enhance_answer_with_currency_conversion(
             question=question,
-            answer_text=raw_answer_text,
+            answer_text=final_answer.strip(),
             trace_builder=trace_builder,
         )
 
-        return Answer(
-            answer_text=final_answer_text,
+        # For now we return only the final answer text + citations,
+        # but we still keep the parsed reasoning available if we want to
+        # log it or add it to traces in the future.
+    
+        return AnswerWithReasoning(
+            reasoning=reasoning.strip(),
+            answer_text=enhanced_final_answer.strip(),
             citations=citations,
         )
+
 
     def _maybe_enhance_answer_with_currency_conversion(
         self,
@@ -721,3 +778,28 @@ class ResponseAgent:
 
             parts.append("\n---\n")
         return "\n".join(parts)
+    
+
+    @staticmethod
+    def _parse_reasoning_and_answer(output: str) -> Tuple[str, str]:
+        """
+        Parses LLM output into reasoning and final answer.
+        Handles formats like:
+          Reasoning: ...\nFinal Answer: ...
+        Even if labels appear on separate lines.
+        """
+        output = re.sub(r'\r\n?', '\n', output).strip()
+
+        # Normalize labels (allow optional newlines after colon)
+        reasoning_match = re.search(r'^Reasoning:\s*(.*?)(?=^Final Answer:|\Z)', output, re.DOTALL | re.MULTILINE)
+        final_match = re.search(r'^Final Answer:\s*(.*)', output, re.DOTALL | re.MULTILINE)
+
+        reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
+        final_answer = final_match.group(1).strip() if final_match else output
+
+        # Fallback: if both missing, treat as final answer
+        if not reasoning and not final_answer:
+            final_answer = output
+
+        return reasoning, final_answer
+
