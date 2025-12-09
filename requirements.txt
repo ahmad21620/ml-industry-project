@@ -12,3 +12,4 @@ faiss-cpu
 
 # Env management (for LLM_BASE_URL, LLM_API_KEY, etc.)
 python-dotenv
+neo4j
