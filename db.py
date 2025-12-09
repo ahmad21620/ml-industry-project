@@ -83,6 +83,26 @@ class EscalationEvent(SQLModel, table=True):
         default=False,
         description="True when an admin has seen/handled this escalation.",
     )
+
+class MessageTrace(SQLModel, table=True):
+    """Per-message trace for admin observability.
+
+    Stores a JSON-serialized trace document describing which agents and tools
+    were used for a given user message, along with context, currency, and
+    escalation metadata.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    conversation_id: int = Field(foreign_key="conversation.id")
+    message_id: int = Field(foreign_key="message.id")
+    user_id: int = Field(foreign_key="user.id")
+
+    # When this trace was recorded (UTC).
+    timestamp_utc: datetime = Field(default_factory=datetime.utcnow)
+
+    # JSON string containing the structured trace payload.
+    trace_json: str
 # ---------- DB HELPERS ----------
 
 def create_db_and_tables() -> None:

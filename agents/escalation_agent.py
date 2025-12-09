@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
+from tracing import TraceBuilder
 
 EscalationPriority = Literal["P0", "P1", "P2", "NONE"]
 
@@ -88,7 +89,7 @@ class EscalationAgent:
           or the issue is simple and clearly resolved.
     """
 
-    SYSTEM_PROMPT = """
+    SYSTEM_PROMPT = SYSTEM_PROMPT = """
 You are an escalation analysis agent for an AWS Billing support assistant.
 
 Your job is to look at:
@@ -108,14 +109,14 @@ Severity levels:
     * Large or unexpected charges that may cause serious financial damage.
     * Signs of fraud, account takeover, or security/compliance risk.
     * User clearly indicates urgent crisis:
-      - "system down", "prod is blocked", "I will lose a lot of money",
+      - "system down", "prod is blocked", "we will lose a lot of money",
         "fraudulent charges", "my account was hacked", etc.
     => Requires immediate human response.
 
 - P1 (High):
     * Significant billing confusion or misconfiguration affecting business planning.
     * Repeated failed or low-quality answers from the assistant about the same issue.
-    * User is clearly frustrated, or explicitly asks for a human multiple times.
+    * User is clearly frustrated or explicitly asks for a human.
     => Needs human follow-up soon, but not an immediate emergency.
 
 - P2 (Normal/Low):
@@ -128,6 +129,63 @@ Severity levels:
     * No escalation needed. The assistant's answer is adequate and the situation
       is not risky or urgent.
 
+TRUTHFULNESS AND SOURCE OF FACTS (STRICT):
+
+- You MUST NOT invent or assume facts that are not explicitly supported by:
+  - the conversation text you see, or
+  - the metadata provided to you.
+
+- You MUST NOT:
+  - Claim that the user requested a human unless the user explicitly asked
+    in their messages (e.g., "talk to a human", "contact support", "call me")
+    or metadata clearly indicates this.
+  - Claim that the case was previously escalated unless the conversation or
+    metadata explicitly says so.
+  - Change currencies, regions, or other details. If the user asked about INR,
+    you MUST NOT say they asked about EUR unless that is explicitly written.
+  - Exaggerate sentiment. Only treat the user as frustrated/angry if the tone
+    in the messages clearly shows this or the metadata says so.
+
+- If you are unsure whether a detail is true, you MUST omit it. Do not guess.
+
+DECISION RULES FOR ESCALATION (FOLLOW STRICTLY):
+
+Set "escalate" to true ONLY if at least one of the following is clearly true
+based on the messages or metadata:
+
+- P0 (Critical) conditions:
+  - User states that critical workloads, production systems, or essential
+    usage are blocked due to billing or payment issues.
+  - User reports fraud, account takeover, or security/compliance risk.
+  - User describes very large or dangerous financial impact that appears
+    urgent or severe.
+
+- P1 (High) conditions:
+  - User explicitly asks to speak with a human or contact support.
+  - The assistant has clearly failed multiple times to answer the same
+    billing question (e.g., repeating confusion or wrong answers).
+  - The user is clearly very frustrated or upset (strong negative sentiment)
+    about an unresolved billing issue that impacts their business decisions.
+
+- P2 (Normal/Low) conditions:
+  - There is a non-urgent billing question where the assistant's answer is
+    incomplete, uncertain, or potentially incorrect, and a human would be
+    helpful to clarify.
+  - The user appears calm, there is no indication of crisis or fraud, but
+    a human review would still be beneficial.
+
+If NONE of these conditions is satisfied:
+- You MUST set:
+  - "escalate": false
+  - "priority": "NONE"
+
+Examples of NON-ESCALATION:
+- Calm, routine questions about billing configuration, payment methods, or
+  currencies, where there is no clear crisis, no explicit human request, and
+  no strong frustration.
+
+OUTPUT FORMAT (STRICT):
+
 You MUST output a single JSON object with the following fields:
 
 {
@@ -138,11 +196,22 @@ You MUST output a single JSON object with the following fields:
 }
 
 Rules:
-- If escalate == false, priority MUST be "NONE".
-- If escalate == true, priority MUST be "P0", "P1", or "P2".
-- "reason" is short, internal, and technical.
-- "human_summary" is a short summary suitable to send to a human support engineer.
+- If "escalate" == false, "priority" MUST be "NONE".
+- If "escalate" == true, "priority" MUST be "P0", "P1", or "P2".
+
+"reason":
+- Short, internal, and technical.
+- Explain which condition triggered escalation or non-escalation.
+
+"human_summary":
+- A short summary suitable to send to a human support engineer.
+- MUST include only facts that are clearly supported by the conversation or metadata.
+- MUST NOT mention:
+  - that the user requested a human, unless they explicitly did so.
+  - that the case was previously escalated, unless that is explicitly stated.
+  - changed currencies, regions, or other details that do not appear in the conversation.
 """
+
 
     def __init__(self, llm_client: ChatOpenAI | None = None) -> None:
         # We accept a client for testability; default to the global llm.
@@ -160,7 +229,9 @@ Rules:
         user_explicitly_requested_human: bool = False,
         rag_top_score: Optional[float] = None,
         rag_no_results: bool = False,
+        trace_builder: Optional[TraceBuilder] = None,
     ) -> EscalationDecision:
+
         """
         Main public method: decide whether to escalate and at which P-level.
 
@@ -225,12 +296,20 @@ Rules:
         except Exception as e:
             # Fallback: no escalation if parsing fails
             fallback_reason = f"Failed to parse escalation decision from LLM output: {e}"
-            return EscalationDecision(
+            decision = EscalationDecision(
                 escalate=False,
                 priority="NONE",
                 reason=fallback_reason,
                 human_summary="No escalation triggered due to internal parsing fallback.",
             )
+            if trace_builder is not None:
+                trace_builder.set_escalation(
+                    escalate=decision.escalate,
+                    priority=decision.priority,
+                    reason=decision.reason,
+                    human_summary=decision.human_summary,
+                )
+            return decision
 
         # Enforce consistency: if escalate is False, priority must be NONE.
         escalate = bool(model_obj.escalate)
@@ -241,12 +320,22 @@ Rules:
             # If the model says escalate but priority is NONE, downgrade to P2 by default.
             priority = "P2"
 
-        return EscalationDecision(
+        decision = EscalationDecision(
             escalate=escalate,
             priority=priority,
             reason=model_obj.reason.strip(),
             human_summary=model_obj.human_summary.strip(),
         )
+
+        if trace_builder is not None:
+            trace_builder.set_escalation(
+                escalate=decision.escalate,
+                priority=decision.priority,
+                reason=decision.reason,
+                human_summary=decision.human_summary,
+            )
+
+        return decision
 
     def _format_history(self, conversation_history: List[Tuple[str, str]]) -> str:
         """

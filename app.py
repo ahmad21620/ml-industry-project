@@ -4,23 +4,26 @@ import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 
+
 from config import ADMIN_TOKEN, DOCS_DIR, FAISS_INDEX_DIR
 from db import (
+    create_db_and_tables,
+    get_session,
     User,
     Conversation,
     Message,
     UserMemory,
     EscalationEvent,
-    create_db_and_tables,
-    get_session,
-    select,
+    MessageTrace,
 )
+
+import json
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 
 from rag.faiss_store import RAGAgent
@@ -28,6 +31,10 @@ from rag.knowledge_graph_agent import KnowledgeGraphAgent
 from agents.response_agent import ResponseAgent
 from agents.memory_agent import UserMemoryAgent
 from agents.escalation_agent import EscalationAgent, EscalationDecision
+from tools import CurrencyFXTool, CurrencyCalculatorTool
+
+from tracing import TraceBuilder
+
 
 # ---------- APP SETUP ----------
 
@@ -63,14 +70,22 @@ def initialize_agents_if_needed() -> None:
         local_rag = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
         local_rag.build_or_load_index()
 
-        
         local_kg = KnowledgeGraphAgent()
         if local_kg.is_graph_empty():
-           for pdf_file in DOCS_DIR.glob("*.pdf"):
+            for pdf_file in DOCS_DIR.glob("*.pdf"):
                 local_kg.index_pdf(pdf_file)
 
+        # Initialize currency tools (stateless, reused via the ResponseAgent).
+        local_currency_fx_tool = CurrencyFXTool()
+        local_currency_calculator_tool = CurrencyCalculatorTool()
 
-        local_response_agent = ResponseAgent(rag_agent=local_rag, kg_agent=local_kg)
+        local_response_agent = ResponseAgent(
+            rag_agent=local_rag,
+            kg_agent=local_kg,
+            #llm_client=llm,  # or omit if you are using the default in ResponseAgent
+            currency_fx_tool=local_currency_fx_tool,
+            currency_calculator_tool=local_currency_calculator_tool,
+        )
         local_memory_agent = UserMemoryAgent()
         local_escalation_agent = EscalationAgent()
 
@@ -79,6 +94,7 @@ def initialize_agents_if_needed() -> None:
         response_agent = local_response_agent
         user_memory_agent = local_memory_agent
         escalation_agent = local_escalation_agent
+
 
 def user_requested_human_explicitly(message: str) -> bool:
     """
@@ -156,6 +172,13 @@ class ChatResponse(BaseModel):
     messages: List[ChatMessageModel]
     sources: List[SourceCitationModel]
     escalation: Optional[EscalationInfo] = None
+
+class AdminMessageTraceModel(BaseModel):
+    message_id: int
+    role: str
+    content: str
+    created_at: datetime
+    trace: Optional[dict]
 
 class EscalationEventModel(BaseModel):
     id: int
@@ -242,31 +265,8 @@ def chat(
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
-    # Fetch current facts
-    current_memories = session.exec(
-        select(UserMemory).where(UserMemory.user_id == user.id)
-    ).all()
-    current_facts = [m.fact for m in current_memories]
-    # Propose & apply update
-    changes = user_memory_agent.update_memory_in_db(
-        user_id=user.id,
-        user_message=request.message,
-        session=session
 
-    )
-    print("DB for Memory changed? ", changes)
-    # print("new facts are", new_facts)
-    # # Sync DB: delete old, insert new
-    # if set(new_facts) != set(current_facts):
-    #     # Delete all old memory entries
-    #     for m in current_memories:
-    #         session.delete(m)
-    #     # Add new ones
-    #     for fact in new_facts:
-    #         session.add(UserMemory(user_id=user.id, fact=fact))
-    #     session.commit()
-
-    # 2) Load conversation history for short-term memory
+    # 2) Load conversation history for short-term memory (without current message)
     history_messages: List[Message] = session.exec(
         select(Message)
         .where(Message.conversation_id == conversation.id)
@@ -286,23 +286,41 @@ def chat(
     session.commit()
     session.refresh(user_msg)
 
-    # 4) Call RAG + ResponseAgent
-    # Pass previous history (without the current message) to the agent
-# Fetch user memory
+    # 4) Initialize a per-message trace builder for admin observability.
+    trace_builder = TraceBuilder.create(
+        conversation_id=conversation.id,
+        message_id=user_msg.id,
+        user_id=user.id,
+    )
+
+    # 5) Long-term memory update based on the new user message
+    changes = user_memory_agent.update_memory_in_db(
+        user_id=user.id,
+        user_message=request.message,
+        session=session,
+        trace_builder=trace_builder,
+    )
+    print("DB for Memory changed? ", changes)
+
+    # 6) Fetch user memory (after potential update)
     user_memories = session.exec(
         select(UserMemory).where(UserMemory.user_id == user.id)
     ).all()
-    user_memory_text = "\n".join(f"- {m.fact}" for m in user_memories) if user_memories else ""
+    user_memory_text = (
+        "\n".join(f"- {m.fact}" for m in user_memories) if user_memories else ""
+    )
 
-    # Call agent with memory
+    # 7) Call RAG + ResponseAgent
+    # Pass previous history (without the current message) to the agent
     answer_obj = response_agent.answer(
         question=request.message,
         k=request.top_k,
         chat_history=chat_history,
         user_memory=user_memory_text,
+        trace_builder=trace_builder,
     )
 
-    # 5) Store assistant message with initial text
+    # 8) Store assistant message with initial text
     final_answer_text = answer_obj.answer_text
 
     assistant_msg = Message(
@@ -317,10 +335,10 @@ def chat(
     session.commit()
     session.refresh(assistant_msg)
 
-    # 6) Prepare history for response and escalation
+    # 9) Prepare history for response and escalation
     updated_messages = history_messages + [user_msg, assistant_msg]
 
-    # 7) Escalation analysis (P0/P1/P2/NONE)
+    # 10) Escalation analysis (P0/P1/P2/NONE)
     escalation_info: Optional[EscalationInfo] = None
     if escalation_agent is not None:
         # Prepare conversation history for the escalation agent
@@ -331,7 +349,7 @@ def chat(
         # Simple heuristics for metadata flags
         user_requested_human_flag = user_requested_human_explicitly(request.message)
         rag_no_results = len(answer_obj.citations) == 0
-        rag_top_score = None
+        rag_top_score: Optional[float] = None
         if not rag_no_results:
             try:
                 rag_top_score = max(c.score for c in answer_obj.citations)
@@ -350,17 +368,18 @@ def chat(
             user_explicitly_requested_human=user_requested_human_flag,
             rag_top_score=rag_top_score,
             rag_no_results=rag_no_results,
+            trace_builder=trace_builder,
         )
 
         if decision.escalate:
-            # 7a) Persist escalation info on the conversation
+            # 10a) Persist escalation info on the conversation
             conversation.escalation_level = decision.priority
             if conversation.escalated_at is None:
                 conversation.escalated_at = datetime.utcnow()
             conversation.escalation_reason = decision.reason
             session.add(conversation)
 
-            # 7b) Create an escalation event (notification) for the admin
+            # 10b) Create an escalation event (notification) for the admin
             escalation_event = EscalationEvent(
                 conversation_id=conversation.id,
                 user_id=user.id,
@@ -371,7 +390,7 @@ def chat(
 
             session.commit()
 
-            # 7c) Append a clear notice for the user
+            # 10c) Append a clear notice for the user
             support_notice = (
                 "I have notified our human AWS Billing support team about your issue. "
                 "They will review your case and contact you as soon as possible."
@@ -390,7 +409,19 @@ def chat(
             human_summary=decision.human_summary,
         )
 
-    # 8) Build response messages and sources from updated state
+    # 11) Build and persist per-message trace
+    if trace_builder is not None:
+        trace_builder.build_pipeline_summary()
+        trace_row = MessageTrace(
+            conversation_id=conversation.id,
+            message_id=user_msg.id,
+            user_id=user.id,
+            trace_json=trace_builder.to_json(),
+        )
+        session.add(trace_row)
+        session.commit()
+
+    # 12) Build response messages and sources from updated state
     # Ensure we use the (possibly updated) assistant_msg content
     updated_messages[-1] = assistant_msg
     recent_for_response = updated_messages[-MAX_HISTORY_MESSAGES:]
@@ -529,6 +560,72 @@ def list_escalations(
         for e in events
     ]
 
+@app.get(
+    "/admin/conversations/{conversation_id}/traces",
+    response_model=List[AdminMessageTraceModel],
+)
+async def get_conversation_traces(
+    conversation_id: int,
+    admin_token: str = Header(..., alias="X-Admin-Token"),
+):
+    """Return all messages of a conversation with their trace payloads.
+
+    This is used by the admin panel to inspect which agents/tools were used
+    for each message and how the pipeline behaved.
+    """
+    # Reuse the same admin-token check pattern as other admin endpoints.
+    if admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+    with get_session() as session:
+        # Load all messages for this conversation, ordered by creation time.
+        messages = (
+            session.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
+            .all()
+        )
+
+        if not messages:
+            return []
+
+        message_ids = [m.id for m in messages]
+
+        # Load all traces for these messages in a single query.
+        traces = (
+            session.query(MessageTrace)
+            .filter(
+                MessageTrace.conversation_id == conversation_id,
+                MessageTrace.message_id.in_(message_ids),
+            )
+            .all()
+        )
+        traces_by_message_id = {t.message_id: t for t in traces}
+
+        results: List[AdminMessageTraceModel] = []
+
+        for msg in messages:
+            trace_row = traces_by_message_id.get(msg.id)
+            if trace_row is not None:
+                try:
+                    trace_data = json.loads(trace_row.trace_json)
+                except Exception:
+                    # If parsing fails for any reason, expose raw string as a best-effort.
+                    trace_data = {"_raw": trace_row.trace_json}
+            else:
+                trace_data = None
+
+            results.append(
+                AdminMessageTraceModel(
+                    message_id=msg.id,
+                    role=msg.role,
+                    content=msg.content,
+                    created_at=msg.created_at,
+                    trace=trace_data,
+                )
+            )
+
+        return results
 
 @app.post("/admin/escalations/{event_id}/ack", response_model=EscalationEventModel)
 def acknowledge_escalation(

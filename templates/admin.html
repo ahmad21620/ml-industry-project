@@ -39,8 +39,7 @@
             <div>
               <h1 class="text-lg font-semibold">AWS Billing Admin</h1>
               <p class="text-xs text-slate-400">
-                Manage users, API keys, and escalations for the multi-agent
-                assistant
+                Manage users, API keys, escalations, and inspect message flows
               </p>
             </div>
           </div>
@@ -222,6 +221,151 @@
               </table>
             </div>
           </section>
+
+          <!-- Conversation inspector & message traces -->
+          <section
+            class="rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur shadow-xl shadow-slate-950/60 p-4 space-y-3"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h2 class="text-sm font-semibold mb-1">
+                  Conversation inspector & traces
+                </h2>
+                <p class="text-xs text-slate-400">
+                  Load a conversation by ID to inspect each message, the agents
+                  triggered, and tools used.
+                </p>
+              </div>
+              <div class="flex items-end gap-2">
+                <div>
+                  <label
+                    for="conversation-id-input"
+                    class="block text-xs font-medium text-slate-300 mb-1"
+                    >Conversation ID</label
+                  >
+                  <input
+                    id="conversation-id-input"
+                    type="number"
+                    class="w-32 rounded-lg bg-slate-950/70 border border-slate-700 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                    placeholder="e.g. 1"
+                  />
+                </div>
+                <button
+                  id="conversation-load-btn"
+                  class="inline-flex items-center rounded-lg bg-primary-600 hover:bg-primary-700 text-xs px-3 py-1.5"
+                >
+                  Load
+                </button>
+              </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="flex flex-wrap items-center gap-4 mb-2">
+              <div>
+                <label
+                  for="filter-escalation"
+                  class="block text-xs font-semibold mb-1"
+                >
+                  Escalation
+                </label>
+                <select
+                  id="filter-escalation"
+                  class="border border-slate-700 bg-slate-950/70 text-xs rounded px-2 py-1"
+                  onchange="onFilterChanged()"
+                >
+                  <option value="ALL">All</option>
+                  <option value="P0">P0 only</option>
+                  <option value="P1">P1 only</option>
+                  <option value="P2">P2 only</option>
+                  <option value="NONE">None</option>
+                </select>
+              </div>
+
+              <div>
+                <label
+                  for="filter-tool"
+                  class="block text-xs font-semibold mb-1"
+                >
+                  Tool
+                </label>
+                <select
+                  id="filter-tool"
+                  class="border border-slate-700 bg-slate-950/70 text-xs rounded px-2 py-1"
+                  onchange="onFilterChanged()"
+                >
+                  <option value="ALL">All</option>
+                  <option value="RAG_FAISS">RAG (FAISS)</option>
+                  <option value="KnowledgeGraph_Neo4j">Knowledge Graph</option>
+                  <option value="CurrencyFXTool">Currency FX</option>
+                  <option value="CurrencyCalculatorTool">
+                    Currency Calculator
+                  </option>
+                </select>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <!-- Messages table -->
+              <div
+                class="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40"
+              >
+                <table class="min-w-full text-xs">
+                  <thead class="bg-slate-900/70 border-b border-slate-800">
+                    <tr>
+                      <th
+                        class="px-3 py-2 text-left font-medium text-slate-300"
+                      >
+                        Role
+                      </th>
+                      <th
+                        class="px-3 py-2 text-left font-medium text-slate-300"
+                      >
+                        Content
+                      </th>
+                      <th
+                        class="px-3 py-2 text-left font-medium text-slate-300"
+                      >
+                        Created
+                      </th>
+                      <th
+                        class="px-3 py-2 text-left font-medium text-slate-300"
+                      >
+                        Trace
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody
+                    id="messages-tbody"
+                    class="divide-y divide-slate-800"
+                  >
+                    <tr>
+                      <td
+                        colspan="4"
+                        class="px-3 py-3 text-center text-slate-500 text-xs"
+                      >
+                        Load a conversation to see messages.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Trace viewer -->
+              <div>
+                <h3 class="text-sm font-semibold mb-2">Message trace</h3>
+                <div
+                  class="border border-slate-800 rounded-xl bg-slate-950/60 p-2 h-[260px] overflow-auto"
+                >
+                  <pre
+                    id="trace-viewer"
+                    class="text-[11px] whitespace-pre-wrap"
+                  >
+Select a message and click "View trace" to inspect the pipeline for that message.</pre
+                  >
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </main>
     </div>
@@ -238,6 +382,18 @@
       const escalationsTableBody = document.getElementById(
         "escalations-table-body"
       );
+
+      const conversationIdInput =
+        document.getElementById("conversation-id-input");
+      const conversationLoadBtn =
+        document.getElementById("conversation-load-btn");
+
+      let currentTracesByMessageId = {};
+      let currentMessagesData = [];
+      let currentFilters = {
+        escalation: "ALL",
+        tool: "ALL",
+      };
 
       function getAdminToken() {
         return localStorage.getItem("aws_admin_token") || "";
@@ -294,7 +450,10 @@
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to load users (${res.status}): ${text || "Unknown error"}`
+              "Failed to load users (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           const users = await res.json();
@@ -378,7 +537,6 @@
           usersTableBody.appendChild(tr);
         }
 
-        // Attach handlers
         usersTableBody.querySelectorAll(".copy-key-btn").forEach((btn) => {
           btn.addEventListener("click", () => {
             const key = btn.getAttribute("data-api-key");
@@ -424,17 +582,24 @@
               "Content-Type": "application/json",
               "X-Admin-Token": token,
             },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({ name: name }),
           });
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to create user (${res.status}): ${text || "Unknown error"}`
+              "Failed to create user (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           const user = await res.json();
           alert(
-            `User created.\n\nName: ${user.name}\nAPI key: ${user.api_key}\n\nCopy this key and give it to the user.`
+            "User created.\n\nName: " +
+              user.name +
+              "\nAPI key: " +
+              user.api_key +
+              "\n\nCopy this key and give it to the user."
           );
           fetchUsers();
         } catch (err) {
@@ -448,7 +613,7 @@
         if (!token) return;
 
         try {
-          const res = await fetch(`/admin/users/${userId}`, {
+          const res = await fetch("/admin/users/" + userId, {
             method: "PATCH",
             headers: {
               "Content-Type": "application/json",
@@ -459,7 +624,10 @@
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to update user (${res.status}): ${text || "Unknown error"}`
+              "Failed to update user (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           fetchUsers();
@@ -474,14 +642,17 @@
         if (!token) return;
 
         try {
-          const res = await fetch(`/admin/users/${userId}`, {
+          const res = await fetch("/admin/users/" + userId, {
             method: "DELETE",
             headers: { "X-Admin-Token": token },
           });
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to delete user (${res.status}): ${text || "Unknown error"}`
+              "Failed to delete user (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           fetchUsers();
@@ -515,7 +686,10 @@
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to load escalations (${res.status}): ${text || "Unknown error"}`
+              "Failed to load escalations (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           const events = await res.json();
@@ -578,7 +752,13 @@
               </div>
             </td>
             <td class="px-3 py-2 text-slate-400 font-mono text-[11px]">
-              #${e.conversation_id}
+              <button
+                type="button"
+                class="underline underline-offset-2 hover:text-primary-300"
+                onclick="loadConversationFromEscalation(${e.conversation_id})"
+              >
+                #${e.conversation_id}
+              </button>
             </td>
             <td class="px-3 py-2 text-slate-400 font-mono text-[11px]">
               ${e.user_id}
@@ -621,14 +801,17 @@
         if (!token) return;
 
         try {
-          const res = await fetch(`/admin/escalations/${eventId}/ack`, {
+          const res = await fetch("/admin/escalations/" + eventId + "/ack", {
             method: "POST",
             headers: { "X-Admin-Token": token },
           });
           if (!res.ok) {
             const text = await res.text();
             throw new Error(
-              `Failed to acknowledge escalation (${res.status}): ${text || "Unknown error"}`
+              "Failed to acknowledge escalation (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
             );
           }
           await res.json();
@@ -641,11 +824,227 @@
         }
       }
 
+      // ---------- Conversation inspector & traces ----------
+
+      async function loadConversationMessages(conversationId) {
+        const token = ensureAdminToken();
+        if (!token) return;
+
+        const tbody = document.getElementById("messages-tbody");
+        if (tbody) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="4" class="px-3 py-3 text-center text-slate-500 text-xs">
+                Loading messages…
+              </td>
+            </tr>
+          `;
+        }
+
+        try {
+          const res = await fetch(
+            "/admin/conversations/" + conversationId + "/traces",
+            {
+              headers: { "X-Admin-Token": token },
+            }
+          );
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(
+              "Failed to load traces (" +
+                res.status +
+                "): " +
+                (text || "Unknown error")
+            );
+          }
+          const data = await res.json();
+
+          currentMessagesData = data || [];
+          currentTracesByMessageId = {};
+          currentMessagesData.forEach((item) => {
+            currentTracesByMessageId[item.message_id] = item.trace || null;
+          });
+
+          renderMessagesTable();
+        } catch (err) {
+          console.error(err);
+          if (tbody) {
+            tbody.innerHTML = `
+              <tr>
+                <td colspan="4" class="px-3 py-3 text-center text-red-400 text-xs">
+                  Error loading messages for this conversation.
+                </td>
+              </tr>
+            `;
+          }
+        }
+      }
+
+      function onFilterChanged() {
+        const escSelect = document.getElementById("filter-escalation");
+        const toolSelect = document.getElementById("filter-tool");
+
+        if (escSelect) {
+          currentFilters.escalation = escSelect.value || "ALL";
+        }
+        if (toolSelect) {
+          currentFilters.tool = toolSelect.value || "ALL";
+        }
+
+        renderMessagesTable();
+      }
+
+      function renderMessagesTable() {
+        const tbody = document.getElementById("messages-tbody");
+        if (!tbody) {
+          console.error("messages-tbody element not found");
+          return;
+        }
+
+        tbody.innerHTML = "";
+
+        if (!currentMessagesData || currentMessagesData.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="4" class="px-3 py-3 text-center text-slate-500 text-xs">
+                No messages for this conversation.
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        currentMessagesData.forEach((msg) => {
+          const trace = currentTracesByMessageId[msg.message_id] || null;
+
+          if (!passesEscalationFilter(trace, currentFilters.escalation)) {
+            return;
+          }
+          if (!passesToolFilter(trace, currentFilters.tool)) {
+            return;
+          }
+
+          const row = document.createElement("tr");
+          row.className = "hover:bg-slate-900/60";
+
+          let createdAt = "";
+          try {
+            createdAt = msg.created_at
+              ? new Date(msg.created_at).toLocaleString()
+              : "";
+          } catch (e) {
+            createdAt = msg.created_at || "";
+          }
+
+          row.innerHTML = `
+            <td class="px-3 py-2 text-slate-200">${msg.role}</td>
+            <td class="px-3 py-2 text-slate-100 max-w-xs">
+              <div class="line-clamp-2 break-words">${msg.content}</div>
+            </td>
+            <td class="px-3 py-2 text-slate-400 text-[11px]">${createdAt}</td>
+            <td class="px-3 py-2">
+              <button
+                type="button"
+                class="px-2 py-1 text-[10px] bg-primary-600 text-white rounded-full hover:bg-primary-700"
+                onclick="showTrace(${msg.message_id})"
+              >
+                View trace
+              </button>
+            </td>
+          `;
+          tbody.appendChild(row);
+        });
+
+        if (!tbody.hasChildNodes()) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="4" class="px-3 py-3 text-center text-slate-500 text-xs">
+                No messages match the current filters.
+              </td>
+            </tr>
+          `;
+        }
+      }
+
+      function passesEscalationFilter(trace, filterValue) {
+        if (filterValue === "ALL") {
+          return true;
+        }
+
+        const priority =
+          trace &&
+          trace.escalation &&
+          typeof trace.escalation.priority === "string"
+            ? trace.escalation.priority
+            : "NONE";
+
+        if (filterValue === "NONE") {
+          return priority === "NONE";
+        }
+
+        return priority === filterValue;
+      }
+
+      function passesToolFilter(trace, filterValue) {
+        if (filterValue === "ALL") {
+          return true;
+        }
+        if (!trace || !Array.isArray(trace.tools_used)) {
+          return false;
+        }
+        return trace.tools_used.includes(filterValue);
+      }
+
+      function showTrace(messageId) {
+        const viewer = document.getElementById("trace-viewer");
+        if (!viewer) {
+          console.error("trace-viewer element not found");
+          return;
+        }
+
+        const trace = currentTracesByMessageId[messageId];
+
+        if (!trace) {
+          viewer.textContent =
+            "No trace recorded for this message (it may predate tracing or be a system-only message).";
+          return;
+        }
+
+        try {
+          viewer.textContent = JSON.stringify(trace, null, 2);
+        } catch (e) {
+          viewer.textContent = "Failed to render trace JSON.";
+        }
+      }
+
+      function loadConversationFromEscalation(convId) {
+        if (conversationIdInput) {
+          conversationIdInput.value = String(convId);
+        }
+        loadConversationMessages(convId);
+      }
+
       // ---------- Event wiring ----------
 
       refreshUsersBtn.addEventListener("click", fetchUsers);
       createUserBtn.addEventListener("click", createUser);
       refreshEscalationsBtn.addEventListener("click", fetchEscalations);
+
+      if (conversationLoadBtn) {
+        conversationLoadBtn.addEventListener("click", () => {
+          const val = conversationIdInput.value.trim();
+          if (!val) {
+            alert("Enter a conversation ID first.");
+            return;
+          }
+          const idNum = parseInt(val, 10);
+          if (Number.isNaN(idNum) || idNum <= 0) {
+            alert("Conversation ID must be a positive number.");
+            return;
+          }
+          loadConversationMessages(idNum);
+        });
+      }
 
       // Auto-load users and escalations if admin token already present
       if (getAdminToken()) {
@@ -653,6 +1052,5 @@
         fetchEscalations();
       }
     </script>
-
   </body>
 </html>

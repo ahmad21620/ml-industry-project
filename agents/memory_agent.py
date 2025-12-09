@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 from sqlmodel import Session
 
+from tracing import TraceBuilder
 
 class MemoryUpdateInstruction(BaseModel):
     action: str  # "add" | "update" | "delete" | "none"
@@ -101,7 +102,8 @@ class UserMemoryAgent:
         self,
         user_id: int,
         user_message: str,
-        session: Session
+        session: Session,
+        trace_builder: "TraceBuilder | None" = None,
     ) -> bool:
         """
         Full memory update cycle:
@@ -110,17 +112,33 @@ class UserMemoryAgent:
         3. Apply changes to DB
         4. Commit transaction
         Returns True if changes were made, False otherwise.
+
+        When a TraceBuilder is provided, this method also records whether
+        memory was updated or left unchanged.
         """
         # Fetch current memories (ordered by id for stable indexing)
-        current_memories = session.query(UserMemory).filter(
-            UserMemory.user_id == user_id
-        ).order_by(UserMemory.id).all()
+        current_memories = (
+            session.query(UserMemory)
+            .filter(UserMemory.user_id == user_id)
+            .order_by(UserMemory.id)
+            .all()
+        )
 
         instructions = self._parse_instructions(user_message, current_memories)
         if not instructions:
+            if trace_builder is not None:
+                trace_builder.mark_user_memory(
+                    invoked=True,
+                    action="none",
+                    summary="No memory changes: no valid update instructions.",
+                )
             return False  # No valid instructions → no change
 
         changed = False
+        added = 0
+        updated = 0
+        deleted = 0
+
         # Track which memory objects to delete (to avoid modifying list during iteration)
         to_delete = []
 
@@ -136,6 +154,7 @@ class UserMemoryAgent:
                         session.add(new_mem)
                         current_memories.append(new_mem)
                         changed = True
+                        added += 1
 
             elif instr.action == "update":
                 if instr.index is not None and instr.new_fact:
@@ -146,6 +165,7 @@ class UserMemoryAgent:
                             old_mem.fact = instr.new_fact.strip()
                             session.add(old_mem)
                             changed = True
+                            updated += 1
 
             elif instr.action == "delete":
                 if instr.index is not None:
@@ -154,6 +174,7 @@ class UserMemoryAgent:
                         mem_to_del = current_memories.pop(idx)
                         to_delete.append(mem_to_del)
                         changed = True
+                        deleted += 1
 
         # Perform deletions after loop
         for mem in to_delete:
@@ -161,4 +182,30 @@ class UserMemoryAgent:
 
         if changed:
             session.commit()
+            if trace_builder is not None:
+                summary_parts = []
+                if added:
+                    summary_parts.append(f"added {added}")
+                if updated:
+                    summary_parts.append(f"updated {updated}")
+                if deleted:
+                    summary_parts.append(f"deleted {deleted}")
+                summary = (
+                    "Memory updated: " + ", ".join(summary_parts)
+                    if summary_parts
+                    else "Memory updated."
+                )
+                trace_builder.mark_user_memory(
+                    invoked=True,
+                    action="update",
+                    summary=summary,
+                )
+        else:
+            if trace_builder is not None:
+                trace_builder.mark_user_memory(
+                    invoked=True,
+                    action="none",
+                    summary="No durable memory changes after applying instructions.",
+                )
+
         return changed
