@@ -16,10 +16,27 @@ FAISS_INDEX_DIR = Path(os.getenv("FAISS_INDEX_DIR", "./data/faiss_index"))
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 FAISS_INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------- DATABASE / LOGGING ----------
+
+DB_PATH = Path(os.getenv("DB_PATH", "./data/chat_logs.db"))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Admin token for managing users via /admin endpoints
+# Set this as an environment variable in real deployments.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "0000")                    #Repalce here
+
+# ---------- NEO4J CONFIG ----------
+
+# Load from environment variables OR fall back to defaults (for local testing)
+NEO4J_URI = os.getenv("NEO4J_URI", "neo4j+s://14d5e4dd.databases.neo4j.io")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "ajKgAyzSjCkjtYfRSpjr1TmHOS39pZMvdAvqaDxA7Fc")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+
 # ---------- LLM PROVIDER ----------
 
 BASE_URL = "http://a6k2.dgx:34000/v1"
-API_KEY = "Replace_Me"                                              #Repalce here
+API_KEY = "sk-wJOTEk68IfYmW5ePxtdpYQ"                                              #Repalce here
 MODEL_NAME = "qwen3-32b"
 
 llm = ChatOpenAI(

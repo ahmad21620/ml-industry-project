@@ -4,6 +4,7 @@ langchain-community
 langchain-core
 langchain-openai
 langchain-text-splitters
+langchain_neo4j
 
 
 # Vector store (CPU-only FAISS)
