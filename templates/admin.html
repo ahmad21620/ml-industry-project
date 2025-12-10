@@ -358,10 +358,8 @@
                 >
                   <pre
                     id="trace-viewer"
-                    class="text-[11px] whitespace-pre-wrap"
-                  >
-Select a message and click "View trace" to inspect the pipeline for that message.</pre
-                  >
+                    class="text-[11px] whitespace-pre-wrap text-slate-200"
+                  >Select a message and click "View trace" to inspect the pipeline for that message.</pre>
                 </div>
               </div>
             </div>
@@ -1010,11 +1008,359 @@ Select a message and click "View trace" to inspect the pipeline for that message
           return;
         }
 
-        try {
-          viewer.textContent = JSON.stringify(trace, null, 2);
-        } catch (e) {
-          viewer.textContent = "Failed to render trace JSON.";
+        // Build a readable multi-section summary
+        const lines = [];
+
+        // Overview
+        lines.push("=== Overview ===");
+        lines.push("Version: " + (trace.version || "n/a"));
+        if (trace.timestamp_utc) {
+          lines.push("Time (UTC): " + trace.timestamp_utc);
         }
+        if (trace.pipeline_summary) {
+          lines.push("Pipeline: " + trace.pipeline_summary);
+        }
+        lines.push("");
+
+        // Agents
+        if (trace.agents && typeof trace.agents === "object") {
+          lines.push("=== Agents ===");
+          Object.keys(trace.agents).forEach(function (name) {
+            const info = trace.agents[name] || {};
+            const invoked = info.invoked ? "yes" : "no";
+            let agentLine = "- " + name + " (invoked: " + invoked + ")";
+            lines.push(agentLine);
+
+            Object.keys(info).forEach(function (k) {
+              if (k === "invoked") return;
+              if (info[k] === undefined || info[k] === null || info[k] === "")
+                return;
+              lines.push("    " + k + ": " + String(info[k]));
+            });
+          });
+          lines.push("");
+        }
+
+        // Tools used
+        if (Array.isArray(trace.tools_used) && trace.tools_used.length > 0) {
+          lines.push("=== Tools used ===");
+          lines.push(trace.tools_used.join(", "));
+          lines.push("");
+        }
+
+        // Context & retrieval
+        if (trace.context && typeof trace.context === "object") {
+          const ctx = trace.context;
+          lines.push("=== Context & retrieval ===");
+          lines.push("Source: " + (ctx.source || "unknown"));
+
+          if (ctx.rag && typeof ctx.rag.used === "boolean") {
+            lines.push("RAG used: " + (ctx.rag.used ? "yes" : "no"));
+          }
+          if (ctx.kg && typeof ctx.kg.used === "boolean") {
+            lines.push("KG used: " + (ctx.kg.used ? "yes" : "no"));
+          }
+          if (ctx.rag && ctx.rag.top_score != null) {
+            lines.push("RAG top score: " + String(ctx.rag.top_score));
+          }
+          if (ctx.kg && ctx.kg.top_score != null) {
+            lines.push("KG top score: " + String(ctx.kg.top_score));
+          }
+          lines.push("");
+        }
+
+        // Currency conversion
+        if (trace.currency_conversion) {
+          const cc = trace.currency_conversion;
+          lines.push("=== Currency conversion ===");
+          if (cc.mode) lines.push("Mode: " + cc.mode);
+          if (
+            cc.amount != null &&
+            cc.source_currency &&
+            cc.target_currency &&
+            cc.converted_amount != null
+          ) {
+            lines.push(
+              "Amount: " +
+                cc.amount +
+                " " +
+                cc.source_currency +
+                " → " +
+                cc.converted_amount +
+                " " +
+                cc.target_currency
+            );
+          }
+          if (cc.rate != null && cc.rate_source) {
+            lines.push("Rate: " + cc.rate + " (" + cc.rate_source + ")");
+          }
+          if (cc.rate_timestamp_utc) {
+            lines.push("Rate time (UTC): " + cc.rate_timestamp_utc);
+          }
+          if (cc.user_supplied_rate != null) {
+            lines.push("User-supplied rate: " + cc.user_supplied_rate);
+          }
+          if (cc.fx_error) {
+            lines.push("FX error: true");
+          }
+          lines.push("");
+        }
+
+        // Escalation
+        if (trace.escalation) {
+          const e = trace.escalation;
+          lines.push("=== Escalation ===");
+          lines.push(
+            "Escalate: " +
+              (e.escalate ? "yes" : "no") +
+              (e.priority ? " · " + e.priority : "")
+          );
+          if (e.reason) {
+            lines.push("Reason: " + e.reason);
+          }
+          if (e.human_summary) {
+            lines.push("Summary: " + e.human_summary);
+          }
+          lines.push("");
+        }
+
+        // Errors
+        if (Array.isArray(trace.errors) && trace.errors.length > 0) {
+          lines.push("=== Errors ===");
+          trace.errors.forEach(function (err) {
+            if (!err || typeof err !== "object") {
+              lines.push("- " + String(err));
+              return;
+            }
+            const comp = err.component || "unknown";
+            const typ = err.type || "Error";
+            const msg = err.message || "";
+            lines.push("- [" + comp + "/" + typ + "] " + msg);
+          });
+          lines.push("");
+        }
+
+        if (lines.length === 0) {
+          viewer.textContent = "Trace object is empty.";
+        } else {
+          viewer.textContent = lines.join("\n");
+        }
+      }
+
+      function buildTraceSummaryHtml(trace) {
+        if (!trace || typeof trace !== "object") {
+          return "Trace data is not available or invalid.";
+        }
+
+        const parts = [];
+
+        // Overview
+        const version = trace.version || "n/a";
+        const ts = trace.timestamp_utc || "";
+        const pipeline = trace.pipeline_summary || "";
+        parts.push(
+          '<div class="mb-1">' +
+            '<div class="font-semibold text-slate-200 mb-0.5">Overview</div>' +
+            '<div class="text-slate-300">Version: ' +
+            version +
+            (ts ? " · Time (UTC): " + ts : "") +
+            "</div>" +
+            (pipeline
+              ? '<div class="text-slate-300">Pipeline: ' +
+                pipeline +
+                "</div>"
+              : "") +
+            "</div>"
+        );
+
+        // Agents
+        if (trace.agents && typeof trace.agents === "object") {
+          const agentLines = [];
+          Object.keys(trace.agents).forEach(function (name) {
+            const info = trace.agents[name] || {};
+            const invoked = info.invoked ? "yes" : "no";
+            const extra = [];
+
+            Object.keys(info).forEach(function (k) {
+              if (k === "invoked") return;
+              if (info[k] === undefined || info[k] === null || info[k] === "")
+                return;
+              extra.push(k + ": " + String(info[k]));
+            });
+
+            agentLines.push(
+              '<div class="ml-2">' +
+                '<span class="font-medium text-slate-200">' +
+                name +
+                "</span>" +
+                ' <span class="text-slate-400">(invoked: ' +
+                invoked +
+                ")</span>" +
+                (extra.length
+                  ? '<div class="text-slate-300 text-[10px] ml-1">' +
+                    extra.join(" · ") +
+                    "</div>"
+                  : "") +
+                "</div>"
+            );
+          });
+
+          if (agentLines.length > 0) {
+            parts.push(
+              '<div class="mt-1">' +
+                '<div class="font-semibold text-slate-200 mb-0.5">Agents</div>' +
+                agentLines.join("") +
+                "</div>"
+            );
+          }
+        }
+
+        // Tools used
+        if (Array.isArray(trace.tools_used) && trace.tools_used.length > 0) {
+          parts.push(
+            '<div class="mt-1">' +
+              '<div class="font-semibold text-slate-200 mb-0.5">Tools used</div>' +
+              '<div class="text-slate-300">' +
+              trace.tools_used.join(", ") +
+              "</div>" +
+              "</div>"
+          );
+        }
+
+        // Context & retrieval
+        if (trace.context && typeof trace.context === "object") {
+          const ctx = trace.context;
+          const source = ctx.source || "unknown";
+          const ragUsed =
+            ctx.rag && typeof ctx.rag.used === "boolean" ? ctx.rag.used : null;
+          const kgUsed =
+            ctx.kg && typeof ctx.kg.used === "boolean" ? ctx.kg.used : null;
+
+          const ctxLines = [];
+          ctxLines.push("Source: " + source);
+          if (ragUsed !== null) {
+            ctxLines.push("RAG used: " + (ragUsed ? "yes" : "no"));
+          }
+          if (kgUsed !== null) {
+            ctxLines.push("KG used: " + (kgUsed ? "yes" : "no"));
+          }
+          if (ctx.rag && ctx.rag.top_score != null) {
+            ctxLines.push("RAG top score: " + String(ctx.rag.top_score));
+          }
+          if (ctx.kg && ctx.kg.top_score != null) {
+            ctxLines.push("KG top score: " + String(ctx.kg.top_score));
+          }
+
+          parts.push(
+            '<div class="mt-1">' +
+              '<div class="font-semibold text-slate-200 mb-0.5">Context & retrieval</div>' +
+              '<div class="text-slate-300 text-[10px] ml-1">' +
+              ctxLines.join(" · ") +
+              "</div>" +
+              "</div>"
+          );
+        }
+
+        // Currency conversion
+        if (trace.currency_conversion) {
+          const cc = trace.currency_conversion;
+          const lines = [];
+
+          if (cc.mode) lines.push("Mode: " + cc.mode);
+          if (
+            cc.amount != null &&
+            cc.source_currency &&
+            cc.target_currency &&
+            cc.converted_amount != null
+          ) {
+            lines.push(
+              "Amount: " +
+                cc.amount +
+                " " +
+                cc.source_currency +
+                " → " +
+                cc.converted_amount +
+                " " +
+                cc.target_currency
+            );
+          }
+          if (cc.rate != null && cc.rate_source) {
+            lines.push("Rate: " + cc.rate + " (" + cc.rate_source + ")");
+          }
+          if (cc.rate_timestamp_utc) {
+            lines.push("Rate time (UTC): " + cc.rate_timestamp_utc);
+          }
+          if (cc.user_supplied_rate != null) {
+            lines.push("User-supplied rate: " + cc.user_supplied_rate);
+          }
+          if (cc.fx_error) {
+            lines.push("FX error: true");
+          }
+
+          parts.push(
+            '<div class="mt-1">' +
+              '<div class="font-semibold text-slate-200 mb-0.5">Currency conversion</div>' +
+              '<div class="text-slate-300 text-[10px] ml-1">' +
+              lines.join("<br>") +
+              "</div>" +
+              "</div>"
+          );
+        }
+
+        // Escalation
+        if (trace.escalation) {
+          const e = trace.escalation;
+          const lines = [];
+
+          const escalateText =
+            "Escalate: " + (e.escalate ? "yes" : "no") +
+            (e.priority ? " · " + e.priority : "");
+          lines.push(escalateText);
+
+          if (e.reason) {
+            lines.push("Reason: " + e.reason);
+          }
+          if (e.human_summary) {
+            lines.push("Summary: " + e.human_summary);
+          }
+
+          parts.push(
+            '<div class="mt-1">' +
+              '<div class="font-semibold text-slate-200 mb-0.5">Escalation</div>' +
+              '<div class="text-slate-300 text-[10px] ml-1">' +
+              lines.join("<br>") +
+              "</div>" +
+              "</div>"
+          );
+        }
+
+        // Errors
+        if (Array.isArray(trace.errors) && trace.errors.length > 0) {
+          const lines = trace.errors.map(function (err) {
+            if (!err || typeof err !== "object") {
+              return "- " + String(err);
+            }
+            const comp = err.component || "unknown";
+            const typ = err.type || "Error";
+            const msg = err.message || "";
+            return "- [" + comp + "/" + typ + "] " + msg;
+          });
+
+          parts.push(
+            '<div class="mt-1">' +
+              '<div class="font-semibold text-slate-200 mb-0.5">Errors</div>' +
+              '<div class="text-slate-300 text-[10px] ml-1">' +
+              lines.join("<br>") +
+              "</div>" +
+              "</div>"
+          );
+        }
+
+        if (parts.length === 0) {
+          return "Trace object is empty.";
+        }
+
+        return parts.join("");
       }
 
       function loadConversationFromEscalation(convId) {
