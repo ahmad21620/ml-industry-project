@@ -1,0 +1,5 @@
+1- Build the docker image
+docker-compose build
+
+2- Run the docker
+docker-compose up

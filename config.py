@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
-from langchain_openai import ChatOpenAI
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
 
 # ---------- PATHS ----------
 
@@ -35,9 +35,9 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 # ---------- LLM PROVIDER ----------
 
-BASE_URL = "http://a6k2.dgx:34000/v1"
-API_KEY = "sk-wJOTEk68IfYmW5ePxtdpYQ"                                              #Repalce here
-MODEL_NAME = "qwen3-32b"
+BASE_URL = os.getenv("LLM_BASE_URL", "http://a6k2.dgx:34000/v1")
+API_KEY = os.getenv("LLM_API_KEY", "your-default-or-fail-safe-key")
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen3-32b")
 
 llm = ChatOpenAI(
     base_url=BASE_URL,
