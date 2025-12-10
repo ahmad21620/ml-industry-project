@@ -3,6 +3,8 @@ from __future__ import annotations
 import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
+import json
+
 
 from tracing import TraceBuilder
 
@@ -157,6 +159,15 @@ class ChatResponse(BaseModel):
     messages: List[ChatMessageModel]
     sources: List[SourceCitationModel]
     escalation: Optional[EscalationInfo] = None
+    # NEW: long-term memory facts for this user, as plain strings
+    user_memory_facts: List[str] = []
+
+class AdminMessageTraceModel(BaseModel):
+    message_id: int
+    role: str
+    content: str
+    created_at: datetime
+    trace: Optional[dict]
 
 class EscalationEventModel(BaseModel):
     id: int
@@ -287,6 +298,8 @@ def chat(
     user_memory_text = (
         "\n".join(f"- {m.fact}" for m in user_memories) if user_memories else ""
     )
+    # NEW: for UI display (simple list of strings)
+    user_memory_facts = [m.fact for m in user_memories]
 
     # 7) Call RAG + ResponseAgent
     # Pass previous history (without the current message) to the agent
@@ -318,6 +331,10 @@ def chat(
 
     # 10) Escalation analysis (P0/P1/P2/NONE)
     escalation_info: Optional[EscalationInfo] = None
+
+    # Make sure you have this somewhere before the escalation block:
+    # final_answer_text = answer_obj.answer_text
+
     if escalation_agent is not None:
         # Prepare conversation history for the escalation agent
         convo_for_escalation = [
@@ -333,7 +350,8 @@ def chat(
                 rag_top_score = max(c.score for c in answer_obj.citations)
             except Exception:
                 rag_top_score = None
-# For now we do not have sentiment or failed-attempt tracking wired in,
+
+        # For now we do not have sentiment or failed-attempt tracking wired in,
         # so we pass defaults for those fields.
         decision = escalation_agent.analyze(
             latest_user_message=request.message,
@@ -367,17 +385,18 @@ def chat(
 
             session.commit()
 
-            # 10c) Append a clear notice for the user
-            support_notice = (
-                "I have notified our human AWS Billing support team about your issue. "
-                "They will review your case and contact you as soon as possible."
-            )
-            final_answer_text = f"{answer_obj.answer_text}\n\n---\n\n{support_notice}"
+            # 10c) Only show human-support notice for P0
+            if decision.priority == "P0":
+                support_notice = (
+                    "I have notified our human AWS Billing support team about your issue. "
+                    "They will review your case and contact you as soon as possible."
+                )
+                final_answer_text = f"{answer_obj.answer_text}\n\n---\n\n{support_notice}"
 
-            # Update the stored assistant message to include the notice
-            assistant_msg.content = final_answer_text
-            session.add(assistant_msg)
-            session.commit()
+                # Update the stored assistant message to include the notice
+                assistant_msg.content = final_answer_text
+                session.add(assistant_msg)
+                session.commit()
 
         escalation_info = EscalationInfo(
             escalate=decision.escalate,
@@ -428,6 +447,7 @@ def chat(
         messages=response_messages,
         sources=sources,
         escalation=escalation_info,
+        user_memory_facts=user_memory_facts,
     )
 
 # ---------- ADMIN: USER MANAGEMENT ----------
@@ -565,3 +585,67 @@ def acknowledge_escalation(
         created_at=event.created_at,
         acknowledged=event.acknowledged,
     )
+
+@app.get(
+    "/admin/conversations/{conversation_id}/traces",
+    response_model=List[AdminMessageTraceModel],
+)
+def get_conversation_traces(
+    conversation_id: int,
+    _: None = Depends(verify_admin_token),
+    session: Session = Depends(get_session),
+):
+    """
+    Return all messages of a conversation with their trace payloads.
+    Used by the admin UI to inspect which agents/tools were used.
+    """
+    # Load all messages for this conversation, ordered by creation time.
+    messages = (
+        session.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    if not messages:
+        return []
+
+    message_ids = [m.id for m in messages]
+
+    # Load all traces for these messages in a single query.
+    traces = (
+        session.query(MessageTrace)
+        .filter(
+            MessageTrace.conversation_id == conversation_id,
+            MessageTrace.message_id.in_(message_ids),
+        )
+        .all()
+    )
+    traces_by_message_id = {t.message_id: t for t in traces}
+
+    results: List[AdminMessageTraceModel] = []
+
+    for msg in messages:
+        trace_row = traces_by_message_id.get(msg.id)
+        if trace_row is not None:
+            try:
+                trace_data = json.loads(trace_row.trace_json)
+            except Exception:
+                # If parsing fails, expose the raw string as a best-effort.
+                trace_data = {"_raw": trace_row.trace_json}
+        else:
+            trace_data = None
+
+        results.append(
+            AdminMessageTraceModel(
+                message_id=msg.id,
+                role=msg.role,
+                content=msg.content,
+                created_at=msg.created_at,
+                trace=trace_data,
+            )
+        )
+
+    return results
+
+

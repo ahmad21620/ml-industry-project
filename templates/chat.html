@@ -161,10 +161,11 @@
             </div>
           </section>
 
-          <!-- Side column: sources and meta -->
+          <!-- Side column: sources, user memory, and meta -->
           <aside
             class="rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur shadow-xl shadow-slate-950/60 p-4 flex flex-col gap-4 h-[calc(100vh-7rem)]"
           >
+            <!-- Sources -->
             <div>
               <h2 class="text-sm font-semibold text-slate-100 mb-1.5">
                 Sources for last answer
@@ -181,8 +182,27 @@
                   Send a message to see which documents were used.
                 </p>
               </div>
+
+              <!-- User memory (long-term memory) -->
+              <div class="mt-4 pt-3 border-t border-slate-800">
+                <h3 class="text-xs font-semibold text-slate-200 mb-1.5">
+                  User memory
+                </h3>
+                <p class="text-[11px] text-slate-400 mb-1">
+                  Facts the assistant has stored about this user across messages.
+                </p>
+                <div
+                  id="user-memory-container"
+                  class="space-y-1 text-[11px] text-slate-200 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900"
+                >
+                  <p class="text-slate-500 italic">
+                    No long-term memory stored yet for this user.
+                  </p>
+                </div>
+              </div>
             </div>
 
+            <!-- Session meta -->
             <div class="mt-auto pt-3 border-t border-slate-800">
               <h3 class="text-xs font-semibold text-slate-200 mb-1.5">
                 Session
@@ -355,6 +375,36 @@
         }
       }
 
+      function renderUserMemory(memoryFacts) {
+        const container = document.getElementById("user-memory-container");
+        if (!container) {
+          console.error("user-memory-container element not found");
+          return;
+        }
+
+        // Clear previous contents
+        container.innerHTML = "";
+
+        if (!memoryFacts || memoryFacts.length === 0) {
+          const p = document.createElement("p");
+          p.className = "text-slate-500 italic";
+          p.textContent = "No long-term memory stored yet for this user.";
+          container.appendChild(p);
+          return;
+        }
+
+        const ul = document.createElement("ul");
+        ul.className = "list-disc list-inside space-y-0.5";
+
+        memoryFacts.forEach((fact) => {
+          const li = document.createElement("li");
+          li.textContent = fact;
+          ul.appendChild(li);
+        });
+
+        container.appendChild(ul);
+      }
+
       function renderEscalation(escalation) {
         // Reset default view
         sessionEscalationStatus.textContent = "None";
@@ -461,6 +511,8 @@
           const data = await response.json();
           renderConversation(data.messages);
           renderSources(data.sources);
+          renderSources(data.sources);
+          renderUserMemory(data.user_memory_facts || []);
           updateSessionInfo(data.conversation_id);
           renderEscalation(data.escalation);
           messageInput.value = "";

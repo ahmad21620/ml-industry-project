@@ -195,8 +195,7 @@ class TraceBuilder:
 
     def set_currency_conversion(
         self,
-        *,
-        mode: Literal["direct", "aws_bill_enhancement"],
+        mode: str,
         amount: float,
         source_currency: str,
         target_currency: str,
@@ -204,24 +203,35 @@ class TraceBuilder:
         rate_source: str,
         rate_timestamp_utc: datetime,
         converted_amount: float,
-        user_supplied_rate: Optional[float] = None,
-        fx_error: bool = False,
+        user_supplied_rate: Optional[float],
+        fx_error: bool,
     ) -> None:
-        self.payload.currency_conversion = CurrencyConversionTrace(
-            mode=mode,
-            amount=amount,
-            source_currency=source_currency,
-            target_currency=target_currency,
-            rate=rate,
-            rate_source=rate_source,
-            rate_timestamp_utc=rate_timestamp_utc,
-            converted_amount=converted_amount,
-            user_supplied_rate=user_supplied_rate,
-            fx_error=fx_error,
-        )
-        # Mark tools as used
-        self.add_tool("CurrencyFXTool")
-        self.add_tool("CurrencyCalculatorTool")
+        """
+        Record a currency conversion attempt/result and mark the currency tools
+        as used for this message.
+        """
+        # Store structured currency-conversion info
+        self.currency_conversion = {
+            "mode": mode,
+            "amount": amount,
+            "source_currency": source_currency,
+            "target_currency": target_currency,
+            "rate": rate,
+            "rate_source": rate_source,
+            "rate_timestamp_utc": rate_timestamp_utc.isoformat()
+            if hasattr(rate_timestamp_utc, "isoformat")
+            else str(rate_timestamp_utc),
+            "converted_amount": converted_amount,
+            "user_supplied_rate": user_supplied_rate,
+            "fx_error": fx_error,
+        }
+
+        # Make sure the tools used are explicitly visible in tools_used.
+        # (Avoid duplicates if the method is called more than once.)
+        if "CurrencyFXTool" not in self.tools_used:
+            self.tools_used.append("CurrencyFXTool")
+        if "CurrencyCalculatorTool" not in self.tools_used:
+            self.tools_used.append("CurrencyCalculatorTool")
 
     def set_escalation(
         self,
