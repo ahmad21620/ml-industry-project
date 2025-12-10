@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 
+load_dotenv()
 # ---------- PATHS ----------
 
 # Folder where you will manually put downloaded AWS billing docs
