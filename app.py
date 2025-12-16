@@ -198,6 +198,7 @@ class ChatMessageModel(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     new_conversation: bool = False
+    conversation_id: Optional[int] = None
     top_k: int = 5
 
 class EscalationInfo(BaseModel):
@@ -214,6 +215,26 @@ class ChatResponse(BaseModel):
     escalation: Optional[EscalationInfo] = None
     # NEW: long-term memory facts for this user, as plain strings
     user_memory_facts: List[str] = []
+
+class ConversationModel(BaseModel):
+    id: int
+    started_at: datetime
+    last_activity_at: datetime
+    escalation_level: Optional[str] = None
+
+class ConversationListItemModel(ConversationModel):
+    message_count: int
+    preview: Optional[str] = None
+
+class ConversationListResponse(BaseModel):
+    conversations: List[ConversationListItemModel]
+
+class ConversationCreateResponse(BaseModel):
+    conversation: ConversationListItemModel
+
+class ConversationDetailResponse(BaseModel):
+    conversation: ConversationModel
+    messages: List[ChatMessageModel]
 
 class AdminMessageTraceModel(BaseModel):
     message_id: int
@@ -248,6 +269,17 @@ class UserRead(BaseModel):
     is_active: bool
     created_at: datetime
 
+class AuthUserModel(BaseModel):
+    id: int
+    name: str
+    is_active: bool
+    created_at: datetime
+
+
+class AuthValidateResponse(BaseModel):
+    valid: bool
+    user: AuthUserModel
+
 
 # ---------- STARTUP ----------
 
@@ -278,6 +310,133 @@ def admin_page(request: Request):
     """
     return templates.TemplateResponse("admin.html", {"request": request})
 
+# ---------- AUTH: TOKEN VALIDATION ----------
+
+@app.get("/auth/validate", response_model=AuthValidateResponse)
+def auth_validate(
+    user: User = Depends(get_current_user),
+):
+    """
+    Lightweight endpoint to validate the user's API token.
+    - 200 if token is valid (returns basic user info)
+    - 401 if token is invalid/inactive (raised by get_current_user)
+    """
+    if user.id is None:
+        raise HTTPException(status_code=500, detail="User record missing id")
+
+    return AuthValidateResponse(
+        valid=True,
+        user=AuthUserModel(
+            id=user.id,
+            name=user.name,
+            is_active=user.is_active,
+            created_at=user.created_at,
+        ),
+    )
+
+# ---------- USER: CONVERSATIONS ----------
+
+@app.get("/conversations", response_model=ConversationListResponse)
+def list_conversations(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    conversations = session.exec(
+        select(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Conversation.last_activity_at.desc())
+    ).all()
+
+    items: List[ConversationListItemModel] = []
+    for conv in conversations:
+        msg_ids = session.exec(
+            select(Message.id).where(Message.conversation_id == conv.id)
+        ).all()
+        message_count = len(msg_ids)
+
+        last_msg = session.exec(
+            select(Message)
+            .where(Message.conversation_id == conv.id)
+            .order_by(Message.created_at.desc())
+        ).first()
+
+        preview: Optional[str] = None
+        if last_msg and last_msg.content:
+            preview = last_msg.content.strip()[:120] or None
+
+        items.append(
+            ConversationListItemModel(
+                id=conv.id,
+                started_at=conv.started_at,
+                last_activity_at=conv.last_activity_at,
+                escalation_level=conv.escalation_level,
+                message_count=message_count,
+                preview=preview,
+            )
+        )
+
+    return ConversationListResponse(conversations=items)
+
+
+@app.post("/conversations", response_model=ConversationCreateResponse)
+def create_conversation(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    conv = Conversation(user_id=user.id)
+    session.add(conv)
+    session.commit()
+    session.refresh(conv)
+
+    item = ConversationListItemModel(
+        id=conv.id,
+        started_at=conv.started_at,
+        last_activity_at=conv.last_activity_at,
+        escalation_level=conv.escalation_level,
+        message_count=0,
+        preview=None,
+    )
+    return ConversationCreateResponse(conversation=item)
+
+
+@app.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
+def get_conversation(
+    conversation_id: int,
+    limit: int = 200,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    conv = session.exec(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    ).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    msgs: List[Message] = session.exec(
+        select(Message)
+        .where(Message.conversation_id == conv.id)
+        .order_by(Message.created_at)
+    ).all()
+
+    if limit is not None and limit > 0 and len(msgs) > limit:
+        msgs = msgs[-limit:]
+
+    return ConversationDetailResponse(
+        conversation=ConversationModel(
+            id=conv.id,
+            started_at=conv.started_at,
+            last_activity_at=conv.last_activity_at,
+            escalation_level=conv.escalation_level,
+        ),
+        messages=[
+            ChatMessageModel(role=m.role, content=m.content, created_at=m.created_at)
+            for m in msgs
+        ],
+    )
+
 # ---------- CHAT ENDPOINT ----------
 
 @app.post("/chat", response_model=ChatResponse)
@@ -293,20 +452,23 @@ def chat(
             detail="Response agent could not be initialized",
         )
 
-    # 1) Find or create conversation for this user
+    # 1) Select or create a conversation
     conversation: Optional[Conversation] = None
-    if not request.new_conversation:
-        conversation = session.exec(
-            select(Conversation)
-            .where(Conversation.user_id == user.id)
-            .order_by(Conversation.last_activity_at.desc())
-        ).first()
 
-    if conversation is None:
+    if request.new_conversation or not request.conversation_id:
         conversation = Conversation(user_id=user.id)
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
+    else:
+        conversation = session.exec(
+            select(Conversation).where(
+                Conversation.id == request.conversation_id,
+                Conversation.user_id == user.id,
+            )
+        ).first()
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
     # 2) Load conversation history for short-term memory (without current message)
     history_messages: List[Message] = session.exec(

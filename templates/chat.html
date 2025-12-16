@@ -84,6 +84,54 @@
                   placeholder="Paste your API key from the admin panel"
                   class="w-full rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                 />
+                <div class="mt-2 flex items-center gap-2">
+                  <button
+                    id="validate-token-button"
+                    type="button"
+                    class="inline-flex items-center rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-1.5 text-xs hover:border-primary-500 hover:text-primary-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Validate
+                  </button>
+
+                  <span
+                    id="token-status-badge"
+                    class="text-xs px-2.5 py-1 rounded-full border bg-slate-950/70 border-slate-700 text-slate-300"
+                  >
+                    Not validated
+                  </span>
+                </div>
+                <div class="mt-3 flex items-center gap-2">
+                  <button
+                    id="new-chat-button"
+                    type="button"
+                    class="inline-flex items-center rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-1.5 text-xs hover:border-primary-500 hover:text-primary-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled
+                  >
+                    New chat
+                  </button>
+
+                  <select
+                    id="conversation-select"
+                    class="min-w-[260px] rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled
+                  >
+                    <option value="">No conversations loaded</option>
+                  </select>
+
+                  <button
+                    id="refresh-conversations-button"
+                    type="button"
+                    class="inline-flex items-center rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-1.5 text-xs hover:border-primary-500 hover:text-primary-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <div
+                  id="ui-error-banner"
+                  class="mt-3 hidden rounded-lg border border-red-700/60 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                ></div>
+
               </div>
               <div class="flex items-center gap-3">
                 <div class="flex flex-col items-start">
@@ -241,6 +289,17 @@
       const sendButton = document.getElementById("send-button");
       const sendSpinner = document.getElementById("send-spinner");
       const statusIndicator = document.getElementById("status-indicator");
+      const validateTokenButton = document.getElementById(
+        "validate-token-button"
+      );
+      const tokenStatusBadge = document.getElementById("token-status-badge");
+      const newChatButton = document.getElementById("new-chat-button");
+      const conversationSelect = document.getElementById("conversation-select");
+      const refreshConversationsButton = document.getElementById(
+        "refresh-conversations-button"
+      );
+      const uiErrorBanner = document.getElementById("ui-error-banner");
+
       const sourcesContainer = document.getElementById("sources-container");
       const sessionConversationId = document.getElementById(
         "session-conversation-id"
@@ -253,31 +312,458 @@
       );
       const escalationBanner = document.getElementById("escalation-banner");
 
+      const STORAGE_KEYS = {
+        apiKey: "aws_chat_api_key",
+        activeConversationId: "aws_chat_active_conversation_id",
+      };
+
+      let isLoading = false;
+      let activeConversationId = null;
+      let isTokenValid = false;
 
       // Load saved API key from localStorage
-      const savedKey = localStorage.getItem("aws_chat_api_key");
+      const savedKey = localStorage.getItem(STORAGE_KEYS.apiKey);
       if (savedKey) {
         apiKeyInput.value = savedKey;
-        apiKeyInput.type = "password";
       }
 
-      apiKeyInput.addEventListener("blur", () => {
+      // Load last active conversation id (UI only for now)
+      const savedConversationId = localStorage.getItem(
+        STORAGE_KEYS.activeConversationId
+      );
+      if (savedConversationId) {
+        const parsedId = parseInt(savedConversationId, 10);
+        if (!Number.isNaN(parsedId)) {
+          activeConversationId = parsedId;
+          sessionConversationId.textContent = String(activeConversationId);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.activeConversationId);
+        }
+      }
+
+      function persistApiKey() {
         const value = apiKeyInput.value.trim();
         if (value) {
-          localStorage.setItem("aws_chat_api_key", value);
+          localStorage.setItem(STORAGE_KEYS.apiKey, value);
+        } else {
+          localStorage.removeItem(STORAGE_KEYS.apiKey);
+        }
+      }
+      function setUiError(message) {
+        if (!uiErrorBanner) return;
+        const text = (message || "").trim();
+        if (!text) {
+          uiErrorBanner.classList.add("hidden");
+          uiErrorBanner.textContent = "";
+          return;
+        }
+        uiErrorBanner.textContent = text;
+        uiErrorBanner.classList.remove("hidden");
+      }
+
+      function clearUiError() {
+        setUiError("");
+      }
+
+      function setTokenStatus(state, detailText = "") {
+        // state: "unknown" | "validating" | "valid" | "invalid"
+        let text = "Not validated";
+        let cls =
+          "text-xs px-2.5 py-1 rounded-full border bg-slate-950/70 border-slate-700 text-slate-300";
+
+        if (state === "validating") {
+          text = "Validating…";
+          cls =
+            "text-xs px-2.5 py-1 rounded-full border bg-amber-950/40 border-amber-600/60 text-amber-200";
+        } else if (state === "valid") {
+          text = "Valid";
+          cls =
+            "text-xs px-2.5 py-1 rounded-full border bg-emerald-950/40 border-emerald-600/60 text-emerald-200";
+        } else if (state === "invalid") {
+          text = "Invalid token";
+          if (detailText) text += `: ${detailText}`;
+          cls =
+            "text-xs px-2.5 py-1 rounded-full border bg-red-950/40 border-red-600/60 text-red-200";
+        }
+
+        tokenStatusBadge.textContent = text;
+        tokenStatusBadge.className = cls;
+      }
+
+      async function validateToken() {
+        clearUiError();
+
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+          isTokenValid = false;
+          setTokenStatus("invalid", "missing");
+
+          // Reset app state
+          activeConversationId = null;
+          localStorage.removeItem(STORAGE_KEYS.activeConversationId);
+          if (conversationSelect) {
+            conversationSelect.innerHTML =
+              '<option value="">No conversations loaded</option>';
+          }
+          renderConversation([]);
+          renderSources([]);
+          renderUserMemory([]);
+          renderEscalation(null);
+
+          syncControlsEnabled();
+          return;
+        }
+
+        setTokenStatus("validating");
+        setLoading(true);
+
+        try {
+          const resp = await fetch("/auth/validate", {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+            },
+          });
+
+          if (!resp.ok) {
+            let detail = "";
+            try {
+              const j = await resp.json();
+              detail = j?.detail ? String(j.detail) : "";
+            } catch (_) {}
+            throw new Error(detail || `HTTP ${resp.status}`);
+          }
+
+          isTokenValid = true;
+          setTokenStatus("valid");
+          clearUiError();
+        } catch (err) {
+          isTokenValid = false;
+          setTokenStatus("invalid", err?.message || "validation failed");
+          setUiError(`Token validation failed: ${err?.message || ""}`.trim());
+
+          // Reset app state
+          activeConversationId = null;
+          localStorage.removeItem(STORAGE_KEYS.activeConversationId);
+          if (conversationSelect) {
+            conversationSelect.innerHTML =
+              '<option value="">No conversations loaded</option>';
+          }
+          renderConversation([]);
+          renderSources([]);
+          renderUserMemory([]);
+          renderEscalation(null);
+        } finally {
+          setLoading(false);
+          syncControlsEnabled();
+        }
+      }
+      
+      async function ensureActiveConversation(createNew = false) {
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) throw new Error("Missing API key");
+
+        if (!createNew && activeConversationId) return activeConversationId;
+
+        const resp = await fetch("/conversations", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        });
+
+        if (!resp.ok) {
+          let detail = "";
+          try {
+            const j = await resp.json();
+            detail = j?.detail ? String(j.detail) : "";
+          } catch (_) {}
+          throw new Error(detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        activeConversationId = data?.conversation?.id;
+
+        if (!activeConversationId) {
+          throw new Error("Conversation creation failed");
+        }
+
+        localStorage.setItem(
+          STORAGE_KEYS.activeConversationId,
+          String(activeConversationId)
+        );
+        updateSessionInfo(activeConversationId);
+
+        return activeConversationId;
+      }
+      
+      async function authedFetch(path, options = {}) {
+        const apiKey = apiKeyInput.value.trim();
+        if (!apiKey) throw new Error("Missing API key");
+
+        const headers = {
+          ...(options.headers || {}),
+          Authorization: `Bearer ${apiKey}`,
+        };
+
+        const resp = await fetch(path, { ...options, headers });
+
+        if (resp.status === 401) {
+          isTokenValid = false;
+          setTokenStatus("invalid", "unauthorized");
+          setUiError("Unauthorized. Please re-validate your API key.");
+
+          // Reset app state
+          activeConversationId = null;
+          localStorage.removeItem(STORAGE_KEYS.activeConversationId);
+          if (conversationSelect) {
+            conversationSelect.innerHTML =
+              '<option value="">No conversations loaded</option>';
+          }
+          renderConversation([]);
+          renderSources([]);
+          renderUserMemory([]);
+          renderEscalation(null);
+
+          syncControlsEnabled();
+        }
+
+        return resp;
+      }
+
+      function renderConversationSelect(conversations, preselectId = null) {
+        conversationSelect.innerHTML = "";
+
+        if (!conversations || conversations.length === 0) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "No conversations";
+          conversationSelect.appendChild(opt);
+          return;
+        }
+
+        for (const c of conversations) {
+          const opt = document.createElement("option");
+          opt.value = String(c.id);
+
+          const preview = (c.preview || "").trim();
+          opt.textContent = preview ? `#${c.id} · ${preview}` : `#${c.id}`;
+
+          conversationSelect.appendChild(opt);
+        }
+
+        if (preselectId) {
+          conversationSelect.value = String(preselectId);
+        } else if (activeConversationId) {
+          conversationSelect.value = String(activeConversationId);
+        } else {
+          conversationSelect.value = String(conversations[0].id);
+        }
+      }
+
+      async function loadConversations(preselectId = null) {
+        const resp = await authedFetch("/conversations", { method: "GET" });
+
+        if (!resp.ok) {
+          let detail = "";
+          try {
+            const j = await resp.json();
+            detail = j?.detail ? String(j.detail) : "";
+          } catch (_) {}
+          throw new Error(detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        const conversations = data?.conversations || [];
+
+        renderConversationSelect(conversations, preselectId);
+
+        // Update activeConversationId from selection if possible
+        const selected = conversationSelect.value;
+        if (selected) {
+          const parsed = parseInt(selected, 10);
+          if (!Number.isNaN(parsed)) {
+            activeConversationId = parsed;
+            localStorage.setItem(
+              STORAGE_KEYS.activeConversationId,
+              String(activeConversationId)
+            );
+            updateSessionInfo(activeConversationId);
+          }
+        }
+      }
+
+      async function openConversation(conversationId) {
+        if (!conversationId) return;
+
+        const resp = await authedFetch(`/conversations/${conversationId}`, {
+          method: "GET",
+        });
+
+        if (!resp.ok) {
+          let detail = "";
+          try {
+            const j = await resp.json();
+            detail = j?.detail ? String(j.detail) : "";
+          } catch (_) {}
+          throw new Error(detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        activeConversationId = conversationId;
+        localStorage.setItem(
+          STORAGE_KEYS.activeConversationId,
+          String(activeConversationId)
+        );
+        updateSessionInfo(activeConversationId);
+
+        // Render messages for this conversation
+        renderConversation(data.messages || []);
+
+        // Clear panels that are only produced on /chat responses
+        renderSources([]);
+        renderUserMemory([]);
+        renderEscalation(null);
+
+        syncControlsEnabled();
+      }
+
+      apiKeyInput.addEventListener("input", () => {
+        persistApiKey();
+
+        // Any change invalidates previous validation
+        isTokenValid = false;
+        setTokenStatus("unknown");
+
+        syncControlsEnabled();
+      });
+
+      validateTokenButton.addEventListener("click", async () => {
+        clearUiError();
+        try {
+          await validateToken();
+
+          if (isTokenValid) {
+            await loadConversations(activeConversationId);
+
+            const selected = conversationSelect.value;
+            const parsed = parseInt(selected, 10);
+            if (!Number.isNaN(parsed)) {
+              await openConversation(parsed);
+            }
+          }
+        } catch (err) {
+          setUiError(`Action failed: ${err?.message || ""}`.trim());
         }
       });
 
-      function setLoading(isLoading) {
-        sendButton.disabled = isLoading;
-        sendSpinner.classList.toggle("hidden", !isLoading);
-        statusIndicator.textContent = isLoading ? "Working…" : "Ready";
+      conversationSelect.addEventListener("change", async () => {
+        clearUiError();
+        try {
+          const parsed = parseInt(conversationSelect.value, 10);
+          if (!Number.isNaN(parsed)) {
+            await openConversation(parsed);
+          }
+        } catch (err) {
+          setUiError(`Open conversation failed: ${err?.message || ""}`.trim());
+        }
+      });
+
+      refreshConversationsButton.addEventListener("click", async () => {
+        clearUiError();
+        try {
+          await loadConversations(activeConversationId);
+        } catch (err) {
+          setUiError(`Refresh failed: ${err?.message || ""}`.trim());
+        }
+      });
+
+      newChatButton.addEventListener("click", async () => {
+        clearUiError();
+        try {
+          if (!isTokenValid) return;
+
+          const newId = await ensureActiveConversation(true);
+
+          await loadConversations(newId);
+          conversationSelect.value = String(newId);
+
+          renderConversation([]);
+          renderSources([]);
+          renderUserMemory([]);
+          renderEscalation(null);
+
+          messageInput.value = "";
+          syncControlsEnabled();
+        } catch (err) {
+          setUiError(`New chat failed: ${err?.message || ""}`.trim());
+        }
+      });
+
+      // Initial state
+      setTokenStatus("unknown");
+      syncControlsEnabled();
+
+      // Auto-validate if a key is already stored
+      if (savedKey) {
+        (async () => {
+          try {
+            await validateToken();
+            if (isTokenValid) {
+              await loadConversations(activeConversationId);
+
+              const selected = conversationSelect.value;
+              const parsed = parseInt(selected, 10);
+              if (!Number.isNaN(parsed)) {
+                await openConversation(parsed);
+              }
+            }
+          } catch (err) {
+            setUiError(`Auto-load failed: ${err?.message || ""}`.trim());
+          }
+        })();
+      }
+
+
+      function syncControlsEnabled() {
+        const apiKey = apiKeyInput.value.trim();
+        const message = messageInput.value.trim();
+
+        // Can always try to validate if a token exists
+        validateTokenButton.disabled = isLoading || !apiKey;
+
+        const canUseApp = !!apiKey && isTokenValid;
+
+        // Conversation navigation
+        newChatButton.disabled = isLoading || !canUseApp;
+        conversationSelect.disabled = isLoading || !canUseApp;
+        refreshConversationsButton.disabled = isLoading || !canUseApp;
+
+        // Chat controls
+        messageInput.disabled = isLoading || !canUseApp;
+        newConversationToggle.disabled = isLoading || !canUseApp;
+        topKInput.disabled = isLoading || !canUseApp;
+
+        sendButton.disabled = isLoading || !canUseApp || !message;
+      }
+
+      function setLoading(loading) {
+        isLoading = loading;
+        sendSpinner.classList.toggle("hidden", !loading);
+        statusIndicator.textContent = loading ? "Working…" : "Ready";
         statusIndicator.className =
           "text-xs px-3 py-1.5 rounded-full border " +
-          (isLoading
+          (loading
             ? "bg-amber-900/40 border-amber-500/60 text-amber-200"
             : "bg-emerald-900/40 border-emerald-500/60 text-emerald-200");
+
+        syncControlsEnabled();
       }
+
+      messageInput.addEventListener("input", syncControlsEnabled);
+      syncControlsEnabled();
 
       function appendMessage(role, content, createdAt) {
         const wrapper = document.createElement("div");
@@ -471,6 +957,10 @@
           apiKeyInput.focus();
           return;
         }
+        if (!isTokenValid) {
+          alert("Please validate your API key before chatting.");
+          return;
+        }
         if (!message) {
           return;
         }
@@ -478,20 +968,43 @@
         setLoading(true);
 
         try {
+          // Decide whether to start a new chat thread
+          const startNew = newConversationToggle.checked || !activeConversationId;
+          const convId = await ensureActiveConversation(startNew);
+
+          // After creating/selecting, clear the toggle
+          newConversationToggle.checked = false;
+
           const response = await fetch("/chat", {
             method: "POST",
             headers: {
-              "Content-Type": "application/json",
               Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              message,
-              new_conversation: newConversation,
+              message: message,
+              conversation_id: convId,
+              new_conversation: false,
               top_k: topK,
             }),
           });
 
           if (!response.ok) {
+            if (response.status === 401) {
+              // Token rejected by server: lock UI until re-validated
+              isTokenValid = false;
+              setTokenStatus("invalid", "unauthorized");
+              syncControlsEnabled();
+            }
+
+            if (response.status === 404) {
+              // Conversation no longer valid (or not owned). Reset and force a new one next send.
+              activeConversationId = null;
+              localStorage.removeItem(STORAGE_KEYS.activeConversationId);
+              updateSessionInfo("—");
+              syncControlsEnabled();
+            }
+
             let errorDetail = "";
             try {
               // Try to parse JSON error (FastAPI's HTTPException uses {"detail": ...})
@@ -509,14 +1022,27 @@
           }
 
           const data = await response.json();
+          clearUiError();
+
+          // Track the active conversation (UI only for now; Step 5 will use it server-side)
+          activeConversationId = data.conversation_id;
+          localStorage.setItem(
+            STORAGE_KEYS.activeConversationId,
+            String(activeConversationId)
+          );
+
           renderConversation(data.messages);
           renderSources(data.sources);
-          renderSources(data.sources);
           renderUserMemory(data.user_memory_facts || []);
-          updateSessionInfo(data.conversation_id);
+          updateSessionInfo(activeConversationId);
           renderEscalation(data.escalation);
+          // Refresh conversation list (preview/ordering/message_count)
+          loadConversations(activeConversationId).catch(() => {});
+
           messageInput.value = "";
           newConversationToggle.checked = false;
+          syncControlsEnabled();
+
 
         } catch (err) {
           console.error(err);
