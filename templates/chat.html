@@ -100,7 +100,7 @@
                     Not validated
                   </span>
                 </div>
-                <div class="mt-3 flex items-center gap-2">
+                <div class="mt-3 flex items-center gap-2 min-w-0">
                   <button
                     id="new-chat-button"
                     type="button"
@@ -112,7 +112,7 @@
 
                   <select
                     id="conversation-select"
-                    class="min-w-[260px] rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    class="flex-1 min-w-0 max-w-[520px] rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 disabled:cursor-not-allowed truncate"
                     disabled
                   >
                     <option value="">No conversations loaded</option>
@@ -127,6 +127,7 @@
                     Refresh
                   </button>
                 </div>
+
                 <div
                   id="ui-error-banner"
                   class="mt-3 hidden rounded-lg border border-red-700/60 bg-red-950/30 px-3 py-2 text-xs text-red-200"
@@ -532,6 +533,22 @@
         return resp;
       }
 
+      async function loadUserMemory() {
+        const resp = await authedFetch("/user/memory", { method: "GET" });
+
+        if (!resp.ok) {
+          let detail = "";
+          try {
+            const j = await resp.json();
+            detail = j?.detail ? String(j.detail) : "";
+          } catch (_) {}
+          throw new Error(detail || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        renderUserMemory(data.facts || []);
+      }
+
       function renderConversationSelect(conversations, preselectId = null) {
         conversationSelect.innerHTML = "";
 
@@ -543,23 +560,24 @@
           return;
         }
 
+        const shorten = (text, maxLen = 48) => {
+          const t = String(text || "").replace(/\s+/g, " ").trim();
+          if (!t) return "";
+          return t.length > maxLen ? t.slice(0, maxLen - 1) + "…" : t;
+        };
+
         for (const c of conversations) {
           const opt = document.createElement("option");
           opt.value = String(c.id);
 
-          const preview = (c.preview || "").trim();
+          const preview = shorten(c.preview, 48);
           opt.textContent = preview ? `#${c.id} · ${preview}` : `#${c.id}`;
 
           conversationSelect.appendChild(opt);
         }
 
-        if (preselectId) {
-          conversationSelect.value = String(preselectId);
-        } else if (activeConversationId) {
-          conversationSelect.value = String(activeConversationId);
-        } else {
-          conversationSelect.value = String(conversations[0].id);
-        }
+        const target = preselectId || activeConversationId || conversations[0].id;
+        conversationSelect.value = String(target);
       }
 
       async function loadConversations(preselectId = null) {
@@ -622,12 +640,15 @@
         // Render messages for this conversation
         renderConversation(data.messages || []);
 
-        // Clear panels that are only produced on /chat responses
+        // Clear panels that are per-last-answer (not per-user)
         renderSources([]);
-        renderUserMemory([]);
         renderEscalation(null);
 
+        // User memory is per-user (should persist across conversations)
+        await loadUserMemory();
+
         syncControlsEnabled();
+
       }
 
       apiKeyInput.addEventListener("input", () => {
@@ -647,6 +668,7 @@
 
           if (isTokenValid) {
             await loadConversations(activeConversationId);
+            await loadUserMemory();
 
             const selected = conversationSelect.value;
             const parsed = parseInt(selected, 10);
@@ -692,8 +714,10 @@
 
           renderConversation([]);
           renderSources([]);
-          renderUserMemory([]);
           renderEscalation(null);
+
+          // Keep user memory visible (per-user)
+          await loadUserMemory();
 
           messageInput.value = "";
           syncControlsEnabled();
@@ -713,6 +737,7 @@
             await validateToken();
             if (isTokenValid) {
               await loadConversations(activeConversationId);
+              await loadUserMemory();
 
               const selected = conversationSelect.value;
               const parsed = parseInt(selected, 10);

@@ -841,8 +841,14 @@ class ResponseAgent:
             return context_block, citations
 
         # ---- Step 2: RAG is weak → try KG if available ----
-        kg_chunks: List[KGRetrievedChunk] = self.kg_agent.retrieve(question, k=k)
+        try:
+            kg_chunks: List[KGRetrievedChunk] = self.kg_agent.retrieve(question, k=k)
+        except Exception as e:
+            logger.warning("KG retrieval failed; falling back to RAG. Error: %s", e)
+            kg_chunks = []
+
         if kg_chunks:
+
             # Use KG result as main context
             context_block = self._format_kg_context(kg_chunks)
             citations = [

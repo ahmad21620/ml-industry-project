@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
@@ -61,27 +62,62 @@ escalation_agent: Optional[EscalationAgent] = None
 knowledge_graph_agent: Optional[KnowledgeGraphAgent] = None
 tool_planner_agent: Optional[ToolPlannerAgent] = None
 
+# If Neo4j/KG is down, we attempt once and then keep running without it.
+kg_init_attempted: bool = False
+
 MAX_HISTORY_MESSAGES = 10
 
 
 def initialize_agents_if_needed() -> None:
-    global rag_agent, response_agent, user_memory_agent, escalation_agent, knowledge_graph_agent, tool_planner_agent
+    global rag_agent, response_agent, user_memory_agent, escalation_agent, knowledge_graph_agent, tool_planner_agent, kg_init_attempted
 
+    # NOTE: knowledge_graph_agent is OPTIONAL, so we do NOT include it in the init condition.
     if (
         rag_agent is None
         or response_agent is None
         or user_memory_agent is None
         or escalation_agent is None
-        or knowledge_graph_agent is None
         or tool_planner_agent is None
     ):
         local_rag = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
         local_rag.build_or_load_index()
 
-        local_kg = KnowledgeGraphAgent()
-        if local_kg.is_graph_empty():
-            for pdf_file in DOCS_DIR.glob("*.pdf"):
-                local_kg.index_pdf(pdf_file)
+        # Try to initialize KG ONCE; if it fails, keep running without KG.
+        if not kg_init_attempted:
+            kg_init_attempted = True
+
+            # Optional hard-disable switch:
+            # set DISABLE_KG=1 (or true/yes) to force RAG-only even if Neo4j is configured.
+            disable_kg = (os.getenv("DISABLE_KG") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+
+            if disable_kg:
+                knowledge_graph_agent = None
+                logger.warning("[KG] Disabled via DISABLE_KG env var.")
+            else:
+                try:
+                    local_kg = KnowledgeGraphAgent()
+
+                    # Index PDFs only if KG is reachable and empty
+                    try:
+                        if local_kg.is_graph_empty():
+                            for pdf_file in DOCS_DIR.glob("*.pdf"):
+                                local_kg.index_pdf(pdf_file)
+                    except Exception as e:
+                        logger.warning("[KG] Connected but indexing check failed; disabling KG. Error: %s", e)
+                        local_kg = None
+
+                    knowledge_graph_agent = local_kg
+                    if knowledge_graph_agent is None:
+                        logger.warning("[KG] Disabled (indexing failure).")
+                    else:
+                        logger.info("[KG] Enabled.")
+                except Exception as e:
+                    knowledge_graph_agent = None
+                    logger.warning("[KG] Disabled (Neo4j unavailable/expired). Error: %s", e)
 
         # Instantiate shared tools and the tool planner.
         local_fx_tool = CurrencyFXTool()
@@ -90,7 +126,7 @@ def initialize_agents_if_needed() -> None:
 
         local_response_agent = ResponseAgent(
             rag_agent=local_rag,
-            kg_agent=local_kg,
+            kg_agent=knowledge_graph_agent,  # may be None → RAG-only
             currency_fx_tool=local_fx_tool,
             currency_calculator_tool=local_calculator_tool,
             tool_planner=local_tool_planner,
@@ -99,11 +135,11 @@ def initialize_agents_if_needed() -> None:
         local_escalation_agent = EscalationAgent()
 
         rag_agent = local_rag
-        knowledge_graph_agent = local_kg
         response_agent = local_response_agent
         user_memory_agent = local_memory_agent
         escalation_agent = local_escalation_agent
         tool_planner_agent = local_tool_planner
+
 
 def user_requested_human_explicitly(message: str) -> bool:
     """
@@ -280,6 +316,9 @@ class AuthValidateResponse(BaseModel):
     valid: bool
     user: AuthUserModel
 
+class UserMemoryFactsResponse(BaseModel):
+    facts: List[str] = []
+
 
 # ---------- STARTUP ----------
 
@@ -333,6 +372,18 @@ def auth_validate(
             created_at=user.created_at,
         ),
     )
+
+@app.get("/user/memory", response_model=UserMemoryFactsResponse)
+def get_user_memory(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    rows = session.exec(
+        select(UserMemory)
+        .where(UserMemory.user_id == user.id)
+        .order_by(UserMemory.updated_at.desc())
+    ).all()
+    return UserMemoryFactsResponse(facts=[r.fact for r in rows])
 
 # ---------- USER: CONVERSATIONS ----------
 
