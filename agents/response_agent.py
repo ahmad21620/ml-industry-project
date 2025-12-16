@@ -118,6 +118,69 @@ class ResponseAgent:
         "Final Answer: <short answer>"
     )
 
+
+    # Minimal alias map for common natural-language currency mentions.
+    # (Extend anytime you want.)
+    CURRENCY_ALIASES = {
+        # AED
+        "aed": "AED",
+        "aeds": "AED",
+        "dirham": "AED",
+        "dirhams": "AED",
+        "uaedirham": "AED",
+        "uaedirhams": "AED",
+
+        # RUB
+        "rub": "RUB",
+        "ruble": "RUB",
+        "rubles": "RUB",
+        "rouble": "RUB",
+        "roubles": "RUB",
+
+        # a few common ones (optional but helpful)
+        "usd": "USD",
+        "dollar": "USD",
+        "dollars": "USD",
+        "eur": "EUR",
+        "euro": "EUR",
+        "euros": "EUR",
+        "jpy": "JPY",
+        "yen": "JPY",
+        "gbp": "GBP",
+        "pound": "GBP",
+        "pounds": "GBP",
+    }
+
+    @classmethod
+    def _normalize_currency_token(cls, token: str) -> Optional[str]:
+        if token is None:
+            return None
+
+        t = token.strip().lower()
+        # keep only letters
+        t = re.sub(r"[^a-z]", "", t)
+
+        if not t:
+            return None
+
+        # ISO code
+        if len(t) == 3 and t.isalpha():
+            return t.upper()
+
+        # pluralized ISO like "aeds" -> "aed"
+        if len(t) == 4 and t.endswith("s") and t[:3].isalpha():
+            return t[:3].upper()
+
+        # alias map
+        if t in cls.CURRENCY_ALIASES:
+            return cls.CURRENCY_ALIASES[t]
+
+        # plural alias fallback
+        if t.endswith("s") and t[:-1] in cls.CURRENCY_ALIASES:
+            return cls.CURRENCY_ALIASES[t[:-1]]
+
+        return None
+
     # If the best RAG similarity score is below this, we consider RAG "weak"
     RAG_MIN_SCORE = 0.8
 
@@ -209,19 +272,10 @@ class ResponseAgent:
                 len(tool_plan.calls),
             )
 
-        # If we have a trace builder, record the full plan and which tools
-        # the planner decided to use. We skip the pseudo-tool 'no_tool'
-        # when populating tools_used.
+        # Record the raw tool plan (planning != execution).
+        # tools_used will be populated ONLY when a tool is actually executed.
         if trace_builder is not None:
-            if tool_plan is not None:
-                # Store the raw plan in the trace for later inspection.
-                trace_builder.set_tool_plan(tool_plan.dict())
-                for call in tool_plan.calls:
-                    if call.name != "no_tool":
-                        trace_builder.add_tool(call.name)
-            else:
-                # Explicitly record that no plan was available.
-                trace_builder.set_tool_plan(None)
+            trace_builder.set_tool_plan(tool_plan.dict() if tool_plan is not None else None)
 
         # 1) Direct currency conversion fast-path (no RAG/KG)
 
@@ -243,28 +297,81 @@ class ResponseAgent:
                     break
 
         if should_try_direct_currency:
+            planned_call = None
+            if tool_plan is not None:
+                planned_call = next(
+                    (c for c in tool_plan.calls if c.name == "currency_conversion"),
+                    None,
+                )
+
             try:
-                conversion_result = self._handle_currency_conversion(question)
+                # 1) If planner provided args, execute conversion from args (most flexible).
+                if planned_call is not None and isinstance(planned_call.args, dict):
+                    amt_raw = planned_call.args.get("amount")
+                    src_raw = planned_call.args.get("source_currency")
+                    dst_raw = planned_call.args.get("target_currency")
+
+                    if amt_raw is not None and src_raw and dst_raw:
+                        amount = float(amt_raw)
+                        src = self._normalize_currency_token(str(src_raw))
+                        dst = self._normalize_currency_token(str(dst_raw))
+
+                        if src and dst:
+                            if trace_builder is not None:
+                                trace_builder.add_tool("currency_conversion")
+                                trace_builder.add_tool_execution(
+                                    tool_name="currency_conversion",
+                                    args={
+                                        "amount": amount,
+                                        "source_currency": src,
+                                        "target_currency": dst,
+                                    },
+                                    success=True,
+                                    error=None,
+                                )
+
+                            conversion_result = self._run_currency_conversion_tool(
+                                amount=amount,
+                                source_currency=src,
+                                target_currency=dst,
+                                user_supplied_rate=None,
+                                propagate_fx_errors=True,
+                            )
+                        else:
+                            # Planner chose the tool but args were not usable → fall back to parsing question.
+                            conversion_result = self._handle_currency_conversion(question)
+                    else:
+                        # Planner chose the tool but didn't provide args → fall back to parsing question.
+                        conversion_result = self._handle_currency_conversion(question)
+                else:
+                    # 2) No usable planner call → fallback to heuristic parsing.
+                    conversion_result = self._handle_currency_conversion(question)
+
             except FXAPIError as exc:
-                # The question looks like a currency conversion request, but we could
-                # not obtain a reliable live FX rate from the external API.
                 if trace_builder is not None:
+                    trace_builder.add_tool("currency_conversion")
+                    trace_builder.add_tool_execution(
+                        tool_name="currency_conversion",
+                        args={"question": question},
+                        success=False,
+                        error=str(exc) or "FXAPIError",
+                    )
                     trace_builder.add_error(
                         component="CurrencyFXTool",
                         type="FXAPIError",
                         message=str(exc) or "Failed to obtain live FX rate.",
                     )
 
-                error_message_lines = [
-                    "You asked for a currency conversion, but live exchange rates "
-                    "are temporarily unavailable.",
-                    "Because I cannot obtain a reliable rate from the currency tool, "
-                    "I cannot safely perform this conversion right now.",
-                ]
                 return Answer(
-                    answer_text="\n".join(error_message_lines),
+                    answer_text=(
+                        "You asked for a currency conversion, but live exchange rates "
+                        "are temporarily unavailable.\n"
+                        "Because I cannot obtain a reliable rate from the currency tool, "
+                        "I cannot safely perform this conversion right now."
+                    ),
                     citations=[],
                 )
+
 
         if conversion_result is not None:
             logger.info(
@@ -717,29 +824,27 @@ class ResponseAgent:
 
     @staticmethod
     def _parse_currency_conversion_request(
+        self,
         question: str,
     ) -> Optional[Tuple[float, str, str, Optional[float]]]:
         """Attempt to parse a simple currency conversion request from text.
 
-        Supported pattern examples:
+        Supports ISO codes and some common currency-name aliases, e.g.:
             "Convert 120 USD to EUR"
             "How much is 500 sar in usd?"
-
-        Returns:
-            (amount, source_currency, target_currency, user_supplied_rate)
-            or None if parsing fails.
+            "translate 1000 aeds to rubles"
         """
         if not question:
             return None
 
         text = question.strip()
 
-        # Basic pattern: "<amount> <SRC> to <DST>" or "<amount> <SRC> in <DST>"
+        # "<amount> <SRC> to|in <DST>" where SRC/DST can be code or name token
         amount_pattern = (
             r"(?P<amount>\d+(?:\.\d+)?)\s*"
-            r"(?P<src>[A-Za-z]{3})\s*"
+            r"(?P<src>[A-Za-z]{3,20})\s*"
             r"(?:to|in)\s*"
-            r"(?P<dst>[A-Za-z]{3})"
+            r"(?P<dst>[A-Za-z]{3,20})\b"
         )
         match = re.search(amount_pattern, text, flags=re.IGNORECASE)
         if not match:
@@ -750,12 +855,18 @@ class ResponseAgent:
         except ValueError:
             return None
 
-        source_currency = match.group("src").upper()
-        target_currency = match.group("dst").upper()
+        src_token = match.group("src")
+        dst_token = match.group("dst")
+
+        source_currency = self._normalize_currency_token(src_token)
+        target_currency = self._normalize_currency_token(dst_token)
+
+        if not source_currency or not target_currency:
+            return None
 
         user_supplied_rate: Optional[float] = None
 
-        # Optional pattern for user-supplied rate, e.g. "1 USD = 5 SAR".
+        # Optional: "1 USD = 5 SAR" (still expects ISO codes here)
         rate_pattern = (
             r"(?P<amount1>\d+(?:\.\d+)?)\s*"
             r"(?P<code1>[A-Za-z]{3})\s*=\s*"
@@ -770,9 +881,6 @@ class ResponseAgent:
                 code1 = rate_match.group("code1").upper()
                 code2 = rate_match.group("code2").upper()
 
-                # Only record the user-supplied rate if the pair matches the
-                # parsed source/target currencies. This rate is NEVER used
-                # for the actual computation, only for transparency later.
                 if amount1 > 0 and code1 == source_currency and code2 == target_currency:
                     user_supplied_rate = amount2 / amount1
                 elif amount2 > 0 and code1 == target_currency and code2 == source_currency:

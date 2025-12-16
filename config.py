@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
@@ -50,16 +50,19 @@ llm = ChatOpenAI(
 
 # ---------- CURRENCY FX API CONFIG ----------
 
-# Base URL for the currency exchange API.
-# Default uses the free Frankfurter API (no API key required).
-FX_API_BASE_URL = os.getenv(
-    "FX_API_BASE_URL",
+# Primary provider (we will switch code to use this in Step 2)
+FX_PRIMARY_BASE_URL = os.getenv(
+    "FX_PRIMARY_BASE_URL",
+    "https://api.exchangerate.host",
+)
+FX_PRIMARY_API_KEY = os.getenv("FX_PRIMARY_API_KEY", "")
+
+# Fallback provider (keep Frankfurter as backup)
+FX_FALLBACK_BASE_URL = os.getenv(
+    "FX_FALLBACK_BASE_URL",
     "https://api.frankfurter.dev/v1",
 )
-
-# Optional API key; many free endpoints like Frankfurter do not require it,
-# but this allows you to switch providers without touching code.
-FX_API_KEY = os.getenv("FX_API_KEY", "")
+FX_FALLBACK_API_KEY = os.getenv("FX_FALLBACK_API_KEY", "")
 
 # Network configuration for FX API calls.
 FX_API_TIMEOUT_SECONDS = float(os.getenv("FX_API_TIMEOUT_SECONDS", "5.0"))
@@ -67,6 +70,11 @@ FX_API_MAX_RETRIES = int(os.getenv("FX_API_MAX_RETRIES", "2"))
 
 # Feature flag: allows disabling FX functionality cleanly if needed.
 FX_API_ENABLED = os.getenv("FX_API_ENABLED", "true").lower() == "true"
+
+# Backward-compatible names (existing code still imports these).
+# For now they keep pointing to Frankfurter until Step 2 rewires the tool.
+FX_API_BASE_URL = os.getenv("FX_API_BASE_URL", FX_FALLBACK_BASE_URL)
+FX_API_KEY = os.getenv("FX_API_KEY", FX_FALLBACK_API_KEY)
 
 # ---------- EMBEDDINGS (LOCAL, CPU) ----------
 

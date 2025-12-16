@@ -579,7 +579,7 @@ def chat(
 
     # 8) Store assistant message with initial text
     final_answer_text = answer_obj.answer_text
-    reasoning = answer_obj.reasoning
+    reasoning = getattr(answer_obj, "reasoning", None)
     assistant_msg = Message(
         conversation_id=conversation.id,
         role="assistant",

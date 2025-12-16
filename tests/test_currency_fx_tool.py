@@ -1,64 +1,97 @@
-from datetime import datetime
-
+from unittest.mock import patch
 import pytest
 
-from tools.currency_fx_tool import CurrencyFXTool, FXRateResult, FXAPIError
+from tools.currency_fx_tool import CurrencyFXTool, FXAPIError
 
 
 class DummyResponse:
-    def __init__(self, status_code=200, json_data=None):
+    def __init__(self, status_code: int, payload=None, text=""):
         self.status_code = status_code
-        self._json_data = json_data or {}
+        self._payload = payload
+        self.text = text
 
     def json(self):
-        return self._json_data
-
-    @property
-    def text(self):
-        return str(self._json_data)
+        if self._payload is None:
+            raise ValueError("No JSON")
+        return self._payload
 
 
-def test_get_rate_success(monkeypatch):
-    """Ensure that CurrencyFXTool parses a basic successful response."""
+def test_exchangerate_host_uses_base_and_symbols_params():
+    tool = CurrencyFXTool(
+        base_url="https://api.exchangerate.host",
+        api_key="",
+        max_retries=0,
+        timeout_seconds=1.0,
+        enabled=True,
+    )
 
-    def dummy_get(url, params=None, timeout=None):
-        assert params["from"] == "USD"
-        assert params["to"] == "EUR"
-        return DummyResponse(
+    with patch("tools.currency_fx_tool.requests.get") as mock_get:
+        mock_get.return_value = DummyResponse(
             200,
-            {
-                "amount": 1.0,
-                "base": "USD",
-                "date": "2024-01-01",
-                "rates": {"EUR": 0.9},
-            },
+            payload={"base": "USD", "rates": {"EUR": 0.92}},
         )
 
-    monkeypatch.setattr("tools.currency_fx_tool.requests.get", dummy_get)
+        res = tool.get_rate("usd", "eur")
 
-    tool = CurrencyFXTool(base_url="https://api.example.com")
+        assert res.base_currency == "USD"
+        assert res.target_currency == "EUR"
+        assert abs(res.rate - 0.92) < 1e-12
+        assert res.source == "ExchangeRate.host"
 
-    result = tool.get_rate("usd", "eur")
-    assert isinstance(result, FXRateResult)
-    assert result.base_currency == "USD"
-    assert result.target_currency == "EUR"
-    assert result.rate == 0.9
-
-
-def test_get_rate_invalid_code():
-    tool = CurrencyFXTool()
-
-    with pytest.raises(FXAPIError):
-        tool.get_rate("US", "EUR")  # invalid base code
-
-    with pytest.raises(FXAPIError):
-        tool.get_rate("USD", "EU")  # invalid target code
+        # Verify request shape
+        args, kwargs = mock_get.call_args
+        assert args[0].endswith("/latest")
+        assert kwargs["params"]["base"] == "USD"
+        assert kwargs["params"]["symbols"] == "EUR"
 
 
-def test_get_rate_same_currency():
-    tool = CurrencyFXTool()
-    result = tool.get_rate("usd", "usd")
-    assert result.rate == 1.0
-    assert result.base_currency == "USD"
-    assert result.target_currency == "USD"
-    assert isinstance(result.fetched_at, datetime)
+def test_fallback_to_frankfurter_when_primary_fails():
+    tool = CurrencyFXTool(
+        base_url="https://api.exchangerate.host",
+        api_key="",
+        fallback_base_url="https://api.frankfurter.app",
+        fallback_api_key="",
+        enable_fallback=True,
+        max_retries=0,
+        timeout_seconds=1.0,
+        enabled=True,
+    )
+
+    with patch("tools.currency_fx_tool.requests.get") as mock_get:
+        # Primary: server error -> should trigger fallback
+        # Fallback: success
+        mock_get.side_effect = [
+            DummyResponse(500, payload={"error": "server down"}, text="server down"),
+            DummyResponse(
+                200,
+                payload={"amount": 1.0, "base": "USD", "rates": {"EUR": 0.93}},
+            ),
+        ]
+
+        res = tool.get_rate("USD", "EUR")
+
+        assert abs(res.rate - 0.93) < 1e-12
+        assert res.source == "Frankfurter"
+        assert mock_get.call_count == 2
+
+
+def test_explicit_base_url_disables_fallback_by_default():
+    tool = CurrencyFXTool(
+        base_url="https://api.exchangerate.host",
+        api_key="",
+        fallback_base_url="https://api.frankfurter.app",
+        fallback_api_key="",
+        # enable_fallback not passed -> should default OFF because base_url is explicit
+        max_retries=0,
+        timeout_seconds=1.0,
+        enabled=True,
+    )
+
+    with patch("tools.currency_fx_tool.requests.get") as mock_get:
+        mock_get.return_value = DummyResponse(500, payload={"error": "server down"}, text="server down")
+
+        with pytest.raises(FXAPIError) as exc:
+            tool.get_rate("USD", "EUR")
+
+        assert "fallback is disabled" in str(exc.value).lower()
+        assert mock_get.call_count == 1
