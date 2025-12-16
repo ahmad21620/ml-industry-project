@@ -1,5 +1,7 @@
 from rag.faiss_store import RAGAgent
 from agents.response_agent import ResponseAgent
+from agents.tool_planner_agent import ToolPlannerAgent
+from tools import CurrencyFXTool, CurrencyCalculatorTool
 from config import DOCS_DIR, FAISS_INDEX_DIR
 
 
@@ -10,7 +12,17 @@ def main():
     rag_agent = RAGAgent(docs_dir=DOCS_DIR, index_dir=FAISS_INDEX_DIR)
     rag_agent.build_or_load_index()
 
-    response_agent = ResponseAgent(rag_agent=rag_agent)
+    tool_planner = ToolPlannerAgent()
+    fx_tool = CurrencyFXTool()
+    calculator_tool = CurrencyCalculatorTool()
+
+    response_agent = ResponseAgent(
+        rag_agent=rag_agent,
+        kg_agent=None,
+        currency_fx_tool=fx_tool,
+        currency_calculator_tool=calculator_tool,
+        tool_planner=tool_planner,
+    )
 
     question = input("Ask an AWS billing question: ")
     answer = response_agent.answer(question, k=5)

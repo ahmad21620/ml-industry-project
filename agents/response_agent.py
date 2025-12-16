@@ -14,6 +14,8 @@ from rag.faiss_store import RAGAgent, RetrievedChunk
 from rag.knowledge_graph_agent import KGRetrievedChunk, KnowledgeGraphAgent
 from tools import CurrencyCalculatorTool, CurrencyFXTool, FXAPIError, FXRateResult
 from tracing import TraceBuilder
+from agents.tool_planner_agent import ToolPlannerAgent, ToolPlan, ToolCall
+
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +128,7 @@ class ResponseAgent:
         llm_client: ChatOpenAI = llm,
         currency_fx_tool: Optional[CurrencyFXTool] = None,
         currency_calculator_tool: Optional[CurrencyCalculatorTool] = None,
+        tool_planner: Optional[ToolPlannerAgent] = None,
     ) -> None:
         self.rag_agent = rag_agent
         self.kg_agent = kg_agent
@@ -135,6 +138,36 @@ class ResponseAgent:
         # currency-specific logic will be skipped.
         self.currency_fx_tool = currency_fx_tool
         self.currency_calculator_tool = currency_calculator_tool
+
+        # Optional tool planner; if None, the agent will fall back to
+        # its built-in heuristic behavior (until we fully migrate).
+        self.tool_planner = tool_planner
+
+    def _maybe_plan_tools(
+        self,
+        question: str,
+        chat_history: Optional[List[Tuple[str, str]]],
+        user_memory: str,
+    ) -> Optional[ToolPlan]:
+        """
+        Call the ToolPlannerAgent (if configured) to obtain a ToolPlan.
+
+        For now this helper only returns the plan; actual execution and full
+        wiring into the answer flow will be added in later steps.
+        """
+        if self.tool_planner is None:
+            return None
+
+        try:
+            plan = self.tool_planner.plan(
+                question=question,
+                chat_history=chat_history,
+                user_memory_summary=user_memory or None,
+            )
+            return plan
+        except Exception as exc:
+            logger.exception("ToolPlannerAgent.plan failed: %s", exc)
+            return None
 
     def answer(
         self,
@@ -154,29 +187,84 @@ class ResponseAgent:
         - return final answer text + structured citations
         """
 
-        # 1) Direct currency conversion fast-path (no RAG/KG)
-        try:
-            conversion_result = self._handle_currency_conversion(question)
-        except FXAPIError as exc:
-            # The question looks like a currency conversion request, but we could
-            # not obtain a reliable live FX rate from the external API.
-            if trace_builder is not None:
-                trace_builder.add_error(
-                    component="CurrencyFXTool",
-                    type="FXAPIError",
-                    message=str(exc) or "Failed to obtain live FX rate.",
-                )
+        # Ask the (optional) tool planner which tools it would use for this question.
+        # The rest of the method (currency logic, RAG/KG, etc.) will respect this
+        # plan when deciding which tools to actually invoke.
+        tool_plan: Optional[ToolPlan] = self._maybe_plan_tools(
+            question=question,
+            chat_history=chat_history,
+            user_memory=user_memory,
+        )
 
-            error_message_lines = [
-                "You asked for a currency conversion, but live exchange rates "
-                "are temporarily unavailable.",
-                "Because I cannot obtain a reliable rate from the currency tool, "
-                "I cannot safely perform this conversion right now.",
-            ]
-            return Answer(
-                answer_text="\n".join(error_message_lines),
-                citations=[],
+        # Log whether we are relying on the planner or falling back to the
+        # built-in heuristic behavior for tool decisions.
+        if tool_plan is None:
+            logger.info(
+                "ResponseAgent.answer: no tool plan available; using heuristic "
+                "fallback for tool decisions."
             )
+        else:
+            logger.info(
+                "ResponseAgent.answer: tool plan obtained with %d call(s).",
+                len(tool_plan.calls),
+            )
+
+        # If we have a trace builder, record the full plan and which tools
+        # the planner decided to use. We skip the pseudo-tool 'no_tool'
+        # when populating tools_used.
+        if trace_builder is not None:
+            if tool_plan is not None:
+                # Store the raw plan in the trace for later inspection.
+                trace_builder.set_tool_plan(tool_plan.dict())
+                for call in tool_plan.calls:
+                    if call.name != "no_tool":
+                        trace_builder.add_tool(call.name)
+            else:
+                # Explicitly record that no plan was available.
+                trace_builder.set_tool_plan(None)
+
+        # 1) Direct currency conversion fast-path (no RAG/KG)
+
+        # Decide whether we should attempt direct currency conversion based
+        # on the tool plan. If there is no planner (or it failed), we keep
+        # the previous behavior and always try. If there is a plan, we only
+        # try when it explicitly chose the currency_conversion tool.
+        conversion_result: Optional[CurrencyConversionResult] = None
+
+        should_try_direct_currency = False
+        if tool_plan is None:
+            # No planner configured or planner failed → preserve old heuristic.
+            should_try_direct_currency = True
+        else:
+            # Planner is present: only attempt conversion if it requested it.
+            for call in tool_plan.calls:
+                if call.name == "currency_conversion":
+                    should_try_direct_currency = True
+                    break
+
+        if should_try_direct_currency:
+            try:
+                conversion_result = self._handle_currency_conversion(question)
+            except FXAPIError as exc:
+                # The question looks like a currency conversion request, but we could
+                # not obtain a reliable live FX rate from the external API.
+                if trace_builder is not None:
+                    trace_builder.add_error(
+                        component="CurrencyFXTool",
+                        type="FXAPIError",
+                        message=str(exc) or "Failed to obtain live FX rate.",
+                    )
+
+                error_message_lines = [
+                    "You asked for a currency conversion, but live exchange rates "
+                    "are temporarily unavailable.",
+                    "Because I cannot obtain a reliable rate from the currency tool, "
+                    "I cannot safely perform this conversion right now.",
+                ]
+                return Answer(
+                    answer_text="\n".join(error_message_lines),
+                    citations=[],
+                )
 
         if conversion_result is not None:
             logger.info(
@@ -255,14 +343,48 @@ class ResponseAgent:
                 citations=[],
             )
 
-        # 2) Decide context source & build citations (RAG → KG fallback, with tracing)
-        context_block, citations = self._get_best_context_and_citations(
-            question=question,
-            k=k,
-            trace_builder=trace_builder,
-        )
+        # 2) Retrieve context (RAG/KG), honoring the tool planner where possible.
+
+        # Decide whether we should perform any RAG/KG retrieval at all. If there is
+        # no planner (or it failed), we preserve the previous behavior and always
+        # try to retrieve context. If there is a plan, we only retrieve when it
+        # explicitly chose rag_retrieval and/or kg_retrieval.
+        use_retrieval = False
+        if tool_plan is None:
+            # No planner configured or planner failed → keep old behavior.
+            use_retrieval = True
+        else:
+            for call in tool_plan.calls:
+                if call.name in ("rag_retrieval", "kg_retrieval"):
+                    use_retrieval = True
+                    break
+
+        # Defaults if we end up not retrieving.
+        context_block: str = ""
+        citations: List[SourceCitation] = []
+
+        if use_retrieval:
+            # Existing helper that decides between RAG and KG using internal
+            # heuristics (e.g., similarity thresholds). In later steps we can
+            # refine this to look more closely at the planner's choices.
+            context_block, citations = self._get_best_context_and_citations(
+                question=question,
+                k=k,
+                trace_builder=trace_builder,
+            )
+        else:
+            # No retrieval requested by the planner: explicitly record this in the
+            # trace so downstream components understand that no RAG/KG context was used.
+            if trace_builder is not None:
+                trace_builder.mark_response_context(
+                    source="NONE",
+                    rag_used=False,
+                    kg_used=False,
+                    notes="Tool planner did not request RAG/KG retrieval.",
+                )
 
         # 3) Format recent conversation history (short-term memory)
+
         history_text = ""
         if chat_history:
             history_lines: List[str] = []
@@ -319,15 +441,33 @@ class ResponseAgent:
         # 5) Parse reasoning + final answer from the LLM output (from version 1)
         reasoning, final_answer = self._parse_reasoning_and_answer(full_output)
 
-        # 6) Optionally enhance the *final answer* with a currency conversion
-        enhanced_final_answer = self._maybe_enhance_answer_with_currency_conversion(
-            question=question,
-            answer_text=final_answer.strip(),
-            trace_builder=trace_builder,
-        )
+        # 6) Optionally enhance the *final answer* with a currency conversion.
+        #
+        # We make this dependent on the tool plan:
+        # - If there is no planner (or it failed → tool_plan is None), we preserve
+        #   the previous behavior and always attempt the enhancement.
+        # - If there is a valid plan, we only attempt enhancement when it explicitly
+        #   includes the currency_conversion tool.
+        enhanced_final_answer = final_answer.strip()
 
-        # For now we return only the final answer text + citations,
-        # but we still keep the parsed reasoning available if we want to
+        should_try_enhancement = False
+        if tool_plan is None:
+            # No planner configured or planner failed → keep old behavior.
+            should_try_enhancement = True
+        else:
+            for call in tool_plan.calls:
+                if call.name == "currency_conversion":
+                    should_try_enhancement = True
+                    break
+
+        if should_try_enhancement:
+            enhanced_final_answer = self._maybe_enhance_answer_with_currency_conversion(
+                question=question,
+                answer_text=enhanced_final_answer,
+                trace_builder=trace_builder,
+            )
+
+        # For now we ignore the reasoning in the HTTP response, but we could
         # log it or add it to traces in the future.
 
         return AnswerWithReasoning(
@@ -486,29 +626,82 @@ class ResponseAgent:
 
         Raises:
             FXAPIError: if the question is a conversion request but obtaining
-                a reliable FX rate from the external API fails.
+                a reliable FX rate from the external API fails or if the
+                currency conversion tools are not properly configured.
         """
-        # If tools are not wired, skip conversion handling.
-        if not self.currency_fx_tool or not self.currency_calculator_tool:
+        if not question:
             return None
 
+        # Attempt to parse the question into a structured conversion request.
         parsed = self._parse_currency_conversion_request(question)
         if not parsed:
+            # Not a supported conversion request pattern.
             return None
 
         amount, source_currency, target_currency, user_supplied_rate = parsed
 
-        # Let FXAPIError propagate to the caller so it can decide how to
-        # inform the user about live FX unavailability.
-        fx_result: FXRateResult = self.currency_fx_tool.get_rate(
-            source_currency,
-            target_currency,
-        )
-
-        converted_amount = self.currency_calculator_tool.convert_amount(
+        # Delegate the actual tool invocation to the shared helper.
+        result = self._run_currency_conversion_tool(
             amount=amount,
-            rate=fx_result.rate,
+            source_currency=source_currency,
+            target_currency=target_currency,
+            user_supplied_rate=user_supplied_rate,
+            # For the direct conversion fast-path we want FXAPIError to
+            # propagate so the caller can show a clear message.
+            propagate_fx_errors=True,
         )
+        return result
+
+    def _run_currency_conversion_tool(
+        self,
+        amount: float,
+        source_currency: str,
+        target_currency: str,
+        user_supplied_rate: Optional[float] = None,
+        propagate_fx_errors: bool = True,
+    ) -> Optional[CurrencyConversionResult]:
+        """Central helper that calls the FX API tool and calculator.
+
+        Args:
+            amount: Amount of money in the source currency.
+            source_currency: Three-letter source currency code (e.g. 'USD').
+            target_currency: Three-letter target currency code (e.g. 'EUR').
+            user_supplied_rate: Optional implied rate parsed from the question.
+            propagate_fx_errors:
+                - If True, any FXAPIError from the FX tool is propagated to the
+                  caller (used by the direct conversion fast-path).
+                - If False, FXAPIError is swallowed and this method returns None.
+
+        Returns:
+            A CurrencyConversionResult on success, or None when conversion
+            cannot be performed and errors are not propagated.
+        """
+        # Sanity checks on amount.
+        if amount is None or amount <= 0:
+            return None
+
+        # Tools must be available.
+        if not self.currency_fx_tool or not self.currency_calculator_tool:
+            if propagate_fx_errors:
+                raise FXAPIError(
+                    "Currency conversion tools are not configured; cannot perform conversion."
+                )
+            return None
+
+        try:
+            fx_result: FXRateResult = self.currency_fx_tool.get_rate(
+                source_currency,
+                target_currency,
+            )
+            converted_amount = self.currency_calculator_tool.convert_amount(
+                amount=amount,
+                rate=fx_result.rate,
+            )
+        except FXAPIError:
+            if propagate_fx_errors:
+                # Let the caller decide how to explain this to the user.
+                raise
+            return None
 
         return CurrencyConversionResult(
             amount=amount,
@@ -520,6 +713,7 @@ class ResponseAgent:
             rate_timestamp=fx_result.fetched_at,
             user_supplied_rate=user_supplied_rate,
         )
+
 
     @staticmethod
     def _parse_currency_conversion_request(
