@@ -30,15 +30,15 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "0000")                    #Repalce here
 # ---------- NEO4J CONFIG ----------
 
 # Load from environment variables OR fall back to defaults (for local testing)
-NEO4J_URI = os.getenv("NEO4J_URI", "neo4j+s://14d5e4dd.databases.neo4j.io")
+NEO4J_URI = os.getenv("NEO4J_URI", "neo4j+s://abf7ebcd.databases.neo4j.io")
 NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "ajKgAyzSjCkjtYfRSpjr1TmHOS39pZMvdAvqaDxA7Fc")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "6M0rdLHK9JFd9ONv2ok03bKx_TIh6oswYormH_OZmQs")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 # ---------- LLM PROVIDER ----------
 
 BASE_URL = os.getenv("LLM_BASE_URL", "http://a6k2.dgx:34000/v1")
-API_KEY = os.getenv("LLM_API_KEY", "your-default-or-fail-safe-key")
+API_KEY = os.getenv("LLM_API_KEY", "sk-wJOTEk68IfYmW5ePxtdpYQ")
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen3-32b")
 
 llm = ChatOpenAI(

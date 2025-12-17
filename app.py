@@ -43,6 +43,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+from safety import looks_like_prompt_injection
+from guards import classify_intent
+from agents.response_agent import Answer
+
 # ---------- APP SETUP ----------
 
 app = FastAPI(
@@ -531,6 +536,18 @@ def chat(
     recent_history = history_messages[-MAX_HISTORY_MESSAGES:]
     chat_history = [(m.role, m.content) for m in recent_history]
 
+
+    # Build a short conversation snapshot for intent classification
+    convo_lines = []
+    for role, content in chat_history[-5:]:  # last up to 5 exchanges
+        speaker = "User" if role == "user" else "Assistant"
+        convo_lines.append(f"{speaker}: {content}")
+
+    # Append the current user message explicitly
+    convo_lines.append(f"User (current): {request.message}")
+    intent_input = "\n".join(convo_lines)
+
+
     # 3) Store the new user message
     user_msg = Message(
         conversation_id=conversation.id,
@@ -564,19 +581,64 @@ def chat(
     user_memory_text = (
         "\n".join(f"- {m.fact}" for m in user_memories) if user_memories else ""
     )
+
+    # First: cheap keyword-based injection guard (only looks at current message)
+    if looks_like_prompt_injection(request.message):
+        safe_text = (
+            "Your message appears to include instructions to change or override my behavior. "
+            "For security reasons, I must ignore those parts. "
+            "Please ask a normal question about AWS billing or cost management."
+        )
+        # Create a synthetic Answer object so the rest of the code can run unchanged
+        answer_obj = Answer(answer_text=safe_text, citations=[])
+    else:
+        # Second: LLM-based intent & safety classifier (uses conversation context)
+        try:
+            intent = classify_intent(intent_input)
+            print(intent)
+        except Exception as e:
+            print("[INTENT CLASSIFIER ERROR]", e)
+            safe_text = (
+                "Sorry, I couldn't safely classify your request. "
+                "Please try again with a clear AWS billing question."
+            )
+            answer_obj = Answer(answer_text=safe_text, citations=[])
+        else:
+            if not intent.is_aws_billing_question:
+                # Out-of-domain → refuse gracefully
+                safe_text = (
+                    "I’m designed specifically to help with AWS billing, cost management, "
+                    "and related tax/support questions. "
+                    "Your message seems to be about something else, so I can't safely answer it. "
+                    "Please rephrase your question in terms of AWS billing."
+                )
+                answer_obj = Answer(answer_text=safe_text, citations=[])
+            elif intent.suspicious:
+                # Looks like prompt injection → refuse / narrow scope
+                safe_text = (
+                    "Your message seems to include instructions that try to override or manipulate "
+                    "my internal behavior. For safety, I will ignore those instructions. "
+                    "Please ask a straightforward question about AWS billing or invoices, "
+                    "and I will do my best to help."
+                )
+                answer_obj = Answer(answer_text=safe_text, citations=[])
+            else:
+
+            
+                # 7) Call RAG + ResponseAgent
+                # Pass previous history (without the current message) to the agent
+                answer_obj = response_agent.answer(
+                    question=request.message,
+                    k=request.top_k,
+                    chat_history=chat_history,
+                    user_memory=user_memory_text,
+                    trace_builder=trace_builder,
+                )
+
+
     # NEW: for UI display (simple list of strings)
     user_memory_facts = [m.fact for m in user_memories]
-
-    # 7) Call RAG + ResponseAgent
-    # Pass previous history (without the current message) to the agent
-    answer_obj = response_agent.answer(
-        question=request.message,
-        k=request.top_k,
-        chat_history=chat_history,
-        user_memory=user_memory_text,
-        trace_builder=trace_builder,
-    )
-
+    
     # 8) Store assistant message with initial text
     final_answer_text = answer_obj.answer_text
     reasoning = getattr(answer_obj, "reasoning", None)
