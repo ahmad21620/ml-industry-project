@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 from safety import looks_like_prompt_injection
-from guards import classify_intent
+from agents.guards import classify_intent
 from agents.response_agent import Answer
 
 # ---------- APP SETUP ----------
