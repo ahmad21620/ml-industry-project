@@ -117,6 +117,10 @@ High-level flow:
 - Using the enriched context, the Response Agent **generates a clear, personalized, and accurate response**.
 - The final answer is delivered to the user, completing the interaction loop.
 
+# Diagram and system flow
+
+![Diagram](diagram.png)
+
 # Running locally (Python)
 
 ### 1) Install dependencies
