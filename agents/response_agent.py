@@ -59,6 +59,58 @@ class ResponseAgent:
     - Optional user memory for personalization.
     """
 
+    @staticmethod
+    def _normalize_iso4217(code: str) -> Optional[str]:
+        """Accept ONLY ISO-4217 3-letter codes. No currency-name guessing here."""
+        if code is None:
+            return None
+        c = code.strip().upper()
+        if len(c) == 3 and c.isalpha():
+            return c
+        return None
+
+    @staticmethod
+    def _last_assistant_text(chat_history: list[tuple[str, str]]) -> Optional[str]:
+        for role, content in reversed(chat_history or []):
+            if role == "assistant" and content:
+                return content
+        return None
+
+    @staticmethod
+    def _currency_conversion_result_to_text(res) -> str:
+        if isinstance(res, str):
+            return res
+
+        # Best-effort formatting for CurrencyConversionResult-like objects
+        amount = getattr(res, "amount", None)
+        src = getattr(res, "source_currency", None)
+        dst = getattr(res, "target_currency", None)
+        rate = getattr(res, "rate", None)
+        converted = getattr(res, "converted_amount", None)
+        source = getattr(res, "source", None)
+        fetched_at = getattr(res, "fetched_at", None)
+
+        fetched_str = ""
+        try:
+            if fetched_at is not None:
+                fetched_str = fetched_at.isoformat()
+        except Exception:
+            fetched_str = str(fetched_at)
+
+        if amount is not None and src and dst and rate is not None and converted is not None:
+            line1 = (
+                f"Using a live exchange rate of 1 {src} = {rate} {dst}"
+                + (f" (source: {source}" if source else "")
+                + (f", fetched at {fetched_str} UTC" if fetched_str else "")
+                + (")" if source else "")
+                + ","
+            )
+            line2 = f"{amount} {src} is approximately {converted} {dst}."
+            return line1 + "\n" + line2
+
+        return str(res)
+
+
     SYSTEM_PROMPT = (
         "You are an AWS billing support assistant. You help users with ANY billing-related "
         "questions, including checking balance, understanding charges, analyzing anomalies, "
@@ -118,68 +170,130 @@ class ResponseAgent:
         "Final Answer: <short answer>"
     )
 
+    @staticmethod
+    def _is_rewrite_request(question: str) -> bool:
+        q = (question or "").lower()
+        return (
+            "same answer" in q
+            or "same response" in q
+            or "provide the same" in q
+            or ("same" in q and "answer" in q)
+        )
 
-    # Minimal alias map for common natural-language currency mentions.
-    # (Extend anytime you want.)
-    CURRENCY_ALIASES = {
-        # AED
-        "aed": "AED",
-        "aeds": "AED",
-        "dirham": "AED",
-        "dirhams": "AED",
-        "uaedirham": "AED",
-        "uaedirhams": "AED",
-
-        # RUB
-        "rub": "RUB",
-        "ruble": "RUB",
-        "rubles": "RUB",
-        "rouble": "RUB",
-        "roubles": "RUB",
-
-        # a few common ones (optional but helpful)
-        "usd": "USD",
-        "dollar": "USD",
-        "dollars": "USD",
-        "eur": "EUR",
-        "euro": "EUR",
-        "euros": "EUR",
-        "jpy": "JPY",
-        "yen": "JPY",
-        "gbp": "GBP",
-        "pound": "GBP",
-        "pounds": "GBP",
-    }
-
-    @classmethod
-    def _normalize_currency_token(cls, token: str) -> Optional[str]:
-        if token is None:
+    def _extract_target_currency_from_request(
+        self,
+        question: str,
+        user_memory_summary: Optional[str] = None,
+    ) -> Optional[str]:
+        if not question:
             return None
 
-        t = token.strip().lower()
-        # keep only letters
-        t = re.sub(r"[^a-z]", "", t)
+        # explicit: "in rubles", "to RUB"
+        m = re.search(r"\b(?:in|to)\s+(?P<cur>[A-Za-z]{3,20})\b", question, flags=re.IGNORECASE)
+        if m:
+            code = self._normalize_iso4217(m.group("cur"))
+            if code:
+                return code
 
-        if not t:
-            return None
-
-        # ISO code
-        if len(t) == 3 and t.isalpha():
-            return t.upper()
-
-        # pluralized ISO like "aeds" -> "aed"
-        if len(t) == 4 and t.endswith("s") and t[:3].isalpha():
-            return t[:3].upper()
-
-        # alias map
-        if t in cls.CURRENCY_ALIASES:
-            return cls.CURRENCY_ALIASES[t]
-
-        # plural alias fallback
-        if t.endswith("s") and t[:-1] in cls.CURRENCY_ALIASES:
-            return cls.CURRENCY_ALIASES[t[:-1]]
+        # implicit: "my local currency" (minimal country->currency map)
+        q = question.lower()
+        if "local currency" in q and user_memory_summary:
+            mem = user_memory_summary.lower()
+            country_to_ccy = {
+                "russia": "RUB",
+                "germany": "EUR",
+                "united states": "USD",
+                "usa": "USD",
+                "uk": "GBP",
+                "united kingdom": "GBP",
+                "japan": "JPY",
+            }
+            for k, v in country_to_ccy.items():
+                if k in mem:
+                    return v
 
         return None
+
+    @staticmethod
+    def _get_last_assistant_message(chat_history: list[tuple[str, str]]) -> Optional[str]:
+        for role, content in reversed(chat_history or []):
+            if role == "assistant" and content:
+                return content
+        return None
+
+    @staticmethod
+    def _format_money(v: float) -> str:
+        av = abs(v)
+        if av >= 1:
+            return f"{v:.2f}"
+        if av >= 0.1:
+            return f"{v:.3f}"
+        return f"{v:.4f}"
+
+    def _localize_usd_amounts_in_text(self, text: str, target_currency: str) -> tuple[str, dict]:
+        """
+        Convert all USD amounts in `text` into `target_currency`.
+        Currently detects:
+          - $0.095/hour
+          - $0.023/GB
+          - 0.10 USD / USD 0.10
+        Calls FX once (USD->target).
+        """
+        if not text:
+            return text, {"converted_count": 0}
+
+        target = self._normalize_iso4217(target_currency) or target_currency.upper()
+
+        # Find USD amounts
+        dollar_pat = re.compile(r"\$(?P<amt>\d+(?:\.\d+)?)(?P<suffix>(?:\s*/\s*[\w\-\.\%]+)?)")
+        usd_after_pat = re.compile(r"(?P<amt>\d+(?:\.\d+)?)\s*USD\b", flags=re.IGNORECASE)
+        usd_before_pat = re.compile(r"\bUSD\s*(?P<amt>\d+(?:\.\d+)?)", flags=re.IGNORECASE)
+
+        matches: list[tuple[int, int, float, str, str]] = []  # (start,end,amount,kind,suffix)
+        for m in dollar_pat.finditer(text):
+            amt = float(m.group("amt"))
+            suffix = m.group("suffix") or ""
+            matches.append((m.start(), m.end(), amt, "DOLLAR", suffix))
+
+        for m in usd_after_pat.finditer(text):
+            amt = float(m.group("amt"))
+            matches.append((m.start(), m.end(), amt, "USD_AFTER", ""))
+
+        for m in usd_before_pat.finditer(text):
+            amt = float(m.group("amt"))
+            matches.append((m.start(), m.end(), amt, "USD_BEFORE", ""))
+
+        if not matches:
+            return text, {"converted_count": 0}
+
+        # FX once
+        fx = self.currency_fx_tool.get_rate("USD", target)  # uses ExchangeRate.host (primary)
+        rate = fx.rate
+
+        # Replace from back to front
+        out = text
+        for start, end, amt, kind, suffix in sorted(matches, key=lambda x: x[0], reverse=True):
+            converted = amt * rate
+            converted_str = self._format_money(converted)
+
+            if kind == "DOLLAR":
+                repl = f"{converted_str} {target}{suffix}"
+            elif kind == "USD_AFTER":
+                repl = f"{converted_str} {target}"
+            else:  # USD_BEFORE
+                repl = f"{target} {converted_str}"
+
+            out = out[:start] + repl + out[end:]
+
+        meta = {
+            "source_currency": "USD",
+            "target_currency": target,
+            "rate": rate,
+            "rate_source": getattr(fx, "source", "FX_API"),
+            "fetched_at": str(getattr(fx, "fetched_at", "")),
+            "converted_count": len(matches),
+        }
+        return out, meta
 
     # If the best RAG similarity score is below this, we consider RAG "weak"
     RAG_MIN_SCORE = 0.8
@@ -296,6 +410,53 @@ class ResponseAgent:
                     should_try_direct_currency = True
                     break
 
+        # ----- Currency localization rewrite (same answer, but in X currency) -----
+        target_ccy = self._extract_target_currency_from_request(
+            question,
+            locals().get("user_memory_summary", None),
+        )
+        if target_ccy and self._is_rewrite_request(question):
+            last_assistant = self._get_last_assistant_message(chat_history)
+            if last_assistant:
+                try:
+                    localized_text, meta = self._localize_usd_amounts_in_text(
+                        last_assistant,
+                        target_ccy,
+                    )
+                except FXAPIError as exc:
+                    if trace_builder is not None:
+                        trace_builder.add_error(
+                            component="CurrencyFXTool",
+                            type="FXAPIError",
+                            message=str(exc) or repr(exc),
+                        )
+                    return Answer(
+                        answer_text=(
+                            "I can rewrite the previous answer in your target currency, but the FX tool failed.\n"
+                            f"Error: {str(exc) or repr(exc)}"
+                        ),
+                        citations=[],
+                    )
+
+                if meta.get("converted_count", 0) > 0:
+                    if trace_builder is not None:
+                        trace_builder.add_tool("currency_conversion")
+                        trace_builder.add_tool_execution(
+                            tool_name="currency_conversion",
+                            args={"mode": "localize_previous_answer", **meta},
+                            success=True,
+                            error=None,
+                        )
+
+                    header = (
+                        f"Using a live exchange rate of 1 USD = {meta['rate']} {meta['target_currency']} "
+                        f"(source: {meta['rate_source']}, fetched at {meta['fetched_at']} UTC),\n"
+                    )
+                    return Answer(
+                        answer_text=header + localized_text,
+                        citations=[],
+                    )
+
         if should_try_direct_currency:
             planned_call = None
             if tool_plan is not None:
@@ -305,47 +466,104 @@ class ResponseAgent:
                 )
 
             try:
-                # 1) If planner provided args, execute conversion from args (most flexible).
+                # Prefer LLM tool-plan args (LLM must output ISO codes in args).
                 if planned_call is not None and isinstance(planned_call.args, dict):
-                    amt_raw = planned_call.args.get("amount")
-                    src_raw = planned_call.args.get("source_currency")
-                    dst_raw = planned_call.args.get("target_currency")
+                    args = planned_call.args
 
-                    if amt_raw is not None and src_raw and dst_raw:
+                    # If amount is provided -> single conversion
+                    amt_raw = args.get("amount")
+                    src_raw = args.get("source_currency") or args.get("from")
+                    dst_raw = args.get("target_currency") or args.get("to")
+
+                    src = self._normalize_iso4217(str(src_raw)) if src_raw else None
+                    dst = self._normalize_iso4217(str(dst_raw)) if dst_raw else None
+
+                    if amt_raw is not None and src and dst:
                         amount = float(amt_raw)
-                        src = self._normalize_currency_token(str(src_raw))
-                        dst = self._normalize_currency_token(str(dst_raw))
 
-                        if src and dst:
-                            if trace_builder is not None:
-                                trace_builder.add_tool("currency_conversion")
-                                trace_builder.add_tool_execution(
-                                    tool_name="currency_conversion",
-                                    args={
-                                        "amount": amount,
-                                        "source_currency": src,
-                                        "target_currency": dst,
-                                    },
-                                    success=True,
-                                    error=None,
-                                )
-
-                            conversion_result = self._run_currency_conversion_tool(
-                                amount=amount,
-                                source_currency=src,
-                                target_currency=dst,
-                                user_supplied_rate=None,
-                                propagate_fx_errors=True,
+                        if trace_builder is not None:
+                            trace_builder.add_tool("currency_conversion")
+                            trace_builder.add_tool_execution(
+                                tool_name="currency_conversion",
+                                args={"amount": amount, "source_currency": src, "target_currency": dst},
+                                success=True,
+                                error=None,
                             )
-                        else:
-                            # Planner chose the tool but args were not usable → fall back to parsing question.
-                            conversion_result = self._handle_currency_conversion(question)
-                    else:
-                        # Planner chose the tool but didn't provide args → fall back to parsing question.
-                        conversion_result = self._handle_currency_conversion(question)
-                else:
-                    # 2) No usable planner call → fallback to heuristic parsing.
-                    conversion_result = self._handle_currency_conversion(question)
+
+                        conversion_result = self._run_currency_conversion_tool(
+                            amount=amount,
+                            source_currency=src,
+                            target_currency=dst,
+                            user_supplied_rate=None,
+                            propagate_fx_errors=True,
+                        )
+                        return Answer(
+                            answer_text=self._currency_conversion_result_to_text(conversion_result),
+                            citations=[],
+                        )
+
+
+                    # If NO amount but target currency is provided -> rewrite previous assistant answer
+                    # (LLM decides target currency ISO; we only rewrite marked USD amounts)
+                    if dst:
+                        prev = self._last_assistant_text(chat_history)
+                        if not prev:
+                            return Answer(
+                                answer_text="I can rewrite the previous answer in another currency, but there is no previous assistant message to rewrite.",
+                                citations=[],
+                            )
+
+                        source_ccy = src or "USD"  # default for AWS pricing examples
+                        fx = self.currency_fx_tool.get_rate(source_ccy, dst)
+                        rate = fx.rate
+
+                        pat_dollar = re.compile(r"(?P<approx>~)?\$(?P<amt>\d+(?:\.\d+)?)")
+                        pat_usd_after = re.compile(r"(?P<amt>\d+(?:\.\d+)?)\s*USD\b", flags=re.IGNORECASE)
+                        pat_usd_before = re.compile(r"\bUSD\s*(?P<amt>\d+(?:\.\d+)?)", flags=re.IGNORECASE)
+
+                        def fmt(x: float) -> str:
+                            ax = abs(x)
+                            if ax >= 1:
+                                return f"{x:.2f}"
+                            if ax >= 0.1:
+                                return f"{x:.3f}"
+                            return f"{x:.4f}"
+
+                        def conv(amount_str: str) -> str:
+                            return fmt(float(amount_str) * rate)
+
+                        def repl_dollar(mm: re.Match) -> str:
+                            approx = "~" if mm.group("approx") else ""
+                            return f"{approx}{conv(mm.group('amt'))} {dst}"
+
+                        def repl_usd_after(mm: re.Match) -> str:
+                            return f"{conv(mm.group('amt'))} {dst}"
+
+                        def repl_usd_before(mm: re.Match) -> str:
+                            return f"{dst} {conv(mm.group('amt'))}"
+
+                        localized = pat_dollar.sub(repl_dollar, prev)
+                        localized = pat_usd_after.sub(repl_usd_after, localized)
+                        localized = pat_usd_before.sub(repl_usd_before, localized)
+
+                        if trace_builder is not None:
+                            trace_builder.add_tool("currency_conversion")
+                            trace_builder.add_tool_execution(
+                                tool_name="currency_conversion",
+                                args={"mode": "rewrite_previous_answer", "source_currency": source_ccy, "target_currency": dst},
+                                success=True,
+                                error=None,
+                            )
+
+                        return Answer(answer_text=localized, citations=[])
+
+                # If planner didn't give usable args, fall back to strict ISO parsing only
+                conversion_result = self._handle_currency_conversion(question)
+                return Answer(
+                    answer_text=self._currency_conversion_result_to_text(conversion_result),
+                    citations=[],
+                )
+
 
             except FXAPIError as exc:
                 if trace_builder is not None:
@@ -364,14 +582,11 @@ class ResponseAgent:
 
                 return Answer(
                     answer_text=(
-                        "You asked for a currency conversion, but live exchange rates "
-                        "are temporarily unavailable.\n"
-                        "Because I cannot obtain a reliable rate from the currency tool, "
-                        "I cannot safely perform this conversion right now."
+                        "Currency conversion failed using the FX tool.\n"
+                        f"Error: {str(exc) or repr(exc)}"
                     ),
                     citations=[],
                 )
-
 
         if conversion_result is not None:
             logger.info(
@@ -858,8 +1073,8 @@ class ResponseAgent:
         src_token = match.group("src")
         dst_token = match.group("dst")
 
-        source_currency = self._normalize_currency_token(src_token)
-        target_currency = self._normalize_currency_token(dst_token)
+        source_currency = self._normalize_iso4217(src_token)
+        target_currency = self._normalize_iso4217(dst_token)
 
         if not source_currency or not target_currency:
             return None

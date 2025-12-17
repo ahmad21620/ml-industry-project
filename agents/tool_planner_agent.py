@@ -238,16 +238,19 @@ class ToolPlannerAgent:
             "}\n\n"
             "Rules:\n"
             "- Prefer rag_retrieval for AWS billing and documentation-related questions.\n"
-            "- Consider kg_retrieval if the question is complex or RAG alone might miss "
-            "relationships (we may chain it after RAG later).\n"
-            "- Use currency_conversion whenever the user asks to convert money between currencies, "
-            "even if they use currency names/plurals (e.g., 'rubles', 'yen', 'dirhams').\n"
-            "- If you choose currency_conversion, you MUST include args: amount, source_currency, target_currency "
-            "using ISO 4217 3-letter codes (e.g., RUB, AED).\n"
-            "- Use no_tool when the question can be answered from general reasoning, "
-            "conversation history, or user memory alone (e.g., chit-chat).\n"
-            "- Do NOT explain your reasoning outside the JSON. Put reasoning only in "
-            'the "rationale" field of the JSON.\n'
+            "- Consider kg_retrieval if the question is complex or RAG alone might miss relationships.\n"
+            "- Use currency_conversion for ANY currency conversion intent, including:\n"
+            "  * direct conversions (e.g., '100 USD to EUR')\n"
+            "  * currency names/plurals (e.g., 'rubles', 'dirhams', 'yen')\n"
+            "  * rewrites of a previous answer into another currency (e.g., 'provide the same answer in AED', 'those examples in rubles')\n"
+            "- If you choose currency_conversion, args MUST use ISO 4217 3-letter codes only.\n"
+            "  * For direct conversions: args = {\"amount\": <number>, \"source_currency\": \"XXX\", \"target_currency\": \"YYY\"}\n"
+            "  * For rewrite requests (no amount provided): args = {\"target_currency\": \"YYY\"} and optionally {\"source_currency\": \"XXX\"}\n"
+            "    - Do NOT invent amounts. The main assistant will rewrite the previous assistant message and convert all detected source-currency amounts.\n"
+            "- Use no_tool only when the question can be answered from general reasoning, conversation history, or user memory alone.\n"
+            "- Do NOT explain your reasoning outside the JSON. Put reasoning only in the \"rationale\" field of the JSON.\n"
+            "JSON-only response. No markdown. No extra text.\n"
+
         )
 
     def _build_human_prompt(
