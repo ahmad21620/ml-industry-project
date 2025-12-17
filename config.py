@@ -38,7 +38,7 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 # ---------- LLM PROVIDER ----------
 
 BASE_URL = os.getenv("LLM_BASE_URL", "http://a6k2.dgx:34000/v1")
-API_KEY = os.getenv("LLM_API_KEY", "sk-wJOTEk68IfYmW5ePxtdpYQ")
+API_KEY = os.getenv("LLM_API_KEY", "YOUR_API_KEY")
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen3-32b")
 
 llm = ChatOpenAI(
