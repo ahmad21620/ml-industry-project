@@ -89,14 +89,20 @@ class UserMemoryAgent:
             ))
         ]
 
-        # try:
-        response = self.llm.invoke(messages)
-        print(response)
-        raw_text = response.content.strip()
-        json_list = self._extract_clean_json_array(raw_text)
-        return [MemoryUpdateInstruction(**item) for item in json_list]
-        # except (json.JSONDecodeError, ValidationError, ValueError, KeyError, TypeError):
-            # return None
+        try:
+            response = self.llm.invoke(messages)
+
+            raw_content = response.content
+            raw_text = raw_content.strip() if isinstance(raw_content, str) else str(raw_content).strip()
+
+            json_list = self._extract_clean_json_array(raw_text)
+            return [MemoryUpdateInstruction(**item) for item in json_list]
+
+        except Exception as e:
+            # Any LLM failure or invalid LLM output -> no memory updates
+            print("[USER MEMORY AGENT ERROR]", e)
+            return None
+
 
     def update_memory_in_db(
         self,

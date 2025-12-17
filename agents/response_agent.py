@@ -757,11 +757,28 @@ class ResponseAgent:
             HumanMessage(content="\n".join(user_prompt_parts)),
         ]
 
-        llm_response = self.llm.invoke(messages)
-        full_output = str(llm_response.content).strip()
+        try:
+            llm_response = self.llm.invoke(messages)
+            full_output = str(llm_response.content).strip()
+        except Exception as e:
+            if trace_builder is not None:
+                trace_builder.add_error(
+                    component="ResponseAgent",
+                    type="LLMInvokeError",
+                    message=str(e) or repr(e),
+                )
+            return AnswerWithReasoning(
+                reasoning="",
+                answer_text=(
+                    "Sorry — I ran into an internal error while generating the answer. "
+                    "Please try again."
+                ),
+                citations=citations,
+            )
 
         # 5) Parse reasoning + final answer from the LLM output (from version 1)
         reasoning, final_answer = self._parse_reasoning_and_answer(full_output)
+
 
         # 6) Optionally enhance the *final answer* with a currency conversion.
         #

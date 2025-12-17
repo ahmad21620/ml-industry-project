@@ -234,8 +234,31 @@ Return ONLY a JSON object:
             HumanMessage(content="\n".join(user_prompt_parts)),
         ]
 
-        llm_response = self.llm.invoke(messages)
-        raw_text = str(llm_response.content)
+        try:
+            llm_response = self.llm.invoke(messages)
+            raw_text = str(llm_response.content)
+        except Exception as e:
+            fallback_reason = f"Escalation LLM call failed: {e}"
+            decision = EscalationDecision(
+                escalate=False,
+                priority="NONE",
+                reason=fallback_reason,
+                human_summary="No escalation triggered due to internal LLM error.",
+            )
+            if trace_builder is not None:
+                trace_builder.add_error(
+                    component="EscalationAgent",
+                    type="LLMInvokeError",
+                    message=str(e) or repr(e),
+                )
+                trace_builder.set_escalation(
+                    escalate=decision.escalate,
+                    priority=decision.priority,
+                    reason=decision.reason,
+                    human_summary=decision.human_summary,
+                )
+            return decision
+
 
         try:
             model_obj = self._parse_llm_output(raw_text)
