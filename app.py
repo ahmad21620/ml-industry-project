@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime
 from typing import List, Literal, Optional
 import json
+import re
 
 
 from tracing import TraceBuilder
@@ -146,26 +147,25 @@ def initialize_agents_if_needed() -> None:
         tool_planner_agent = local_tool_planner
 
 
-def user_requested_human_explicitly(message: str) -> bool:
-    """
-    Simple heuristic to detect if the user explicitly asks for a human / escalation.
+def user_requested_human_explicitly(text: str) -> bool:
+    if not text:
+        return False
 
-    This is a best-effort string check; the EscalationAgent will still see the full text.
-    """
-    text = message.lower()
-    keywords = [
-        "talk to a human",
-        "talk to human",
-        "human agent",
-        "live agent",
-        "real person",
-        "support agent",
-        "escalate",
-        "escalation",
-        "speak to a person",
-        "speak to someone",
+    t = text.strip().lower()
+    t = re.sub(r"\s+", " ", t)
+
+    patterns = [
+        r"\b(talk|speak)\s+to\s+(a\s+)?(human|person|agent|representative|rep|operator)\b",
+        r"\b(real|actual)\s+(human|person)\b",
+        r"\blive\s+(agent|support|representative)\b",
+        r"\bcustomer\s+service\b",
+        r"\b(contact|connect)\s+(me\s+to\s+)?(support|customer\s+service|a\s+human|an\s+agent|a\s+representative)\b",
+        r"\b(escalate|escalation)\b.*\b(human|agent|representative|support)\b",
+        r"\b(can|could)\s+i\s+(talk|speak)\s+to\s+someone\b",
+        r"\bcall\s+me\b",
     ]
-    return any(k in text for k in text.split()) or any(k in text for k in keywords)
+
+    return any(re.search(p, t) for p in patterns)
 
 
 # ---------- AUTH HELPERS ----------

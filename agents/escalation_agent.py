@@ -155,7 +155,7 @@ Return ONLY a JSON object:
 
 - If "escalate" is false, "priority" MUST be "NONE".
 - If "escalate" is true, "priority" MUST be "P0", "P1", or "P2".
-- "reason": short internal explanation (e.g. "greeting only, no billing issue", "user requested human and repeated confusion").
+- "reason": short internal explanation (e.g. "greeting only, no billing issue", "user requested human, and repeated confusion").
 - "human_summary": short description for a human engineer, using ONLY facts supported by user messages or metadata.
 """
 

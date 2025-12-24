@@ -21,7 +21,7 @@ INTENT_SYSTEM_PROMPT = (
     "Given a single user message, you must:\n"
     "\n"
     "1) Decide whether the message is related to AWS billing, invoicing, cost management, taxes, payments, or AWS support cases.\n"
-    "   - Greetings, small talk, or unrelated messages are valid inputs and must be classified as true.\n"
+    "   - Greetings, small talk, or unrelated messages are valid inputs and must be classified as is_aws_billing_question = true .\n"
     "\n"
     "2) Decide whether the message is suspicious.\n"
     "   - Greetings and polite conversation are NOT suspicious.\n"
